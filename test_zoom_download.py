@@ -172,6 +172,47 @@ def sanitize_filename(name):
     return name
 
 
+def is_video_file(recording_file):
+    """
+    Check if a recording file is a video file (not audio, transcript, etc.).
+    
+    Args:
+        recording_file: A recording file object from Zoom API
+    
+    Returns:
+        Boolean indicating if this is a video file
+    """
+    recording_type = recording_file.get("recording_type", "").lower()
+    
+    # Skip non-video files
+    skip_types = [
+        'audio_only',
+        'timeline',
+        'audio_transcript',
+        'chat_file',
+        'closed_caption'
+    ]
+    
+    return recording_type not in skip_types
+
+
+def get_all_video_files(recording_files):
+    """
+    Get all video files from a list of recording files.
+    
+    Args:
+        recording_files: List of recording file objects from Zoom API
+    
+    Returns:
+        List of video recording file objects
+    """
+    video_files = []
+    for file in recording_files:
+        if is_video_file(file):
+            video_files.append(file)
+    return video_files
+
+
 def download_video(download_url, access_token, output_path):
     """Download a video file."""
     print(f"\nDownloading to {output_path}...")
@@ -211,10 +252,10 @@ def main():
     last_3_recordings = recordings[:3]
     
     print(f"\n{'='*60}")
-    print(f"Downloading Gallery View videos from last 3 meetings...")
+    print(f"Downloading ALL videos from last 3 meetings...")
     print(f"{'='*60}\n")
     
-    downloaded_count = 0
+    total_downloaded = 0
     
     for idx, recording in enumerate(last_3_recordings, 1):
         meeting_topic = recording.get('topic', 'Untitled Meeting')
@@ -226,50 +267,68 @@ def main():
         
         recording_files = recording.get("recording_files", [])
         
-        # Find best Gallery View file (with fallback to speaker view)
-        gallery_file = find_best_gallery_view_file(recording_files)
+        # Get all video files (excluding audio_only, timeline, transcripts, etc.)
+        video_files = get_all_video_files(recording_files)
         
-        if not gallery_file:
-            print(f"  ✗ No video file found (skipping)")
+        if not video_files:
+            print(f"  ✗ No video files found (skipping)")
             continue
         
-        file_type = gallery_file.get('recording_type', 'unknown')
-        download_url = gallery_file.get('download_url')
-        file_size = gallery_file.get('file_size', 0)
+        # Identify the best file for YouTube upload (for reference)
+        best_file = find_best_gallery_view_file(recording_files)
+        best_type = best_file.get('recording_type', 'unknown') if best_file else None
         
-        # Determine if it's Gallery View or fallback
-        is_gallery = file_type in ['shared_screen_with_gallery_view', 'gallery_view']
-        view_type = "Gallery View" if is_gallery else "Speaker View (fallback)"
+        print(f"  Found {len(video_files)} video file(s)")
+        if best_file:
+            is_gallery = best_type in ['shared_screen_with_gallery_view', 'gallery_view']
+            view_type = "Gallery View" if is_gallery else "Speaker View"
+            print(f"  → Best for YouTube: {best_type} ({view_type})")
         
-        print(f"  ✓ Found {view_type}: {file_type} ({file_size / (1024*1024):.1f} MB)")
-        
-        if not download_url:
-            print(f"  ✗ No download URL available")
-            continue
-        
-        # Create filename from meeting topic, date, and time to ensure uniqueness
+        # Create date/time strings for directory/filename
         try:
             dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
             date_str = dt.strftime("%Y-%m-%d")
-            time_str = dt.strftime("%H%M")  # Hours and minutes in 24-hour format
+            time_str = dt.strftime("%H%M")
         except (ValueError, AttributeError):
             date_str = datetime.now().strftime("%Y-%m-%d")
             time_str = datetime.now().strftime("%H%M")
         
-        # Include time to make filenames unique for same-day meetings
-        # Exclude meeting topic since it's always the same
-        filename = f"{date_str}_{time_str}_{file_type}.mp4"
-        output_path = f"test_downloads/{filename}"
+        # Create directory for this recording
+        recording_dir = f"test_downloads/{date_str}_{time_str}"
+        os.makedirs(recording_dir, exist_ok=True)
         
-        try:
-            download_video(download_url, access_token, output_path)
-            print(f"  ✓ Successfully downloaded to {output_path}")
-            downloaded_count += 1
-        except Exception as e:
-            print(f"  ✗ Download failed: {e}")
+        # Download all video files
+        recording_downloaded = 0
+        for video_file in video_files:
+            file_type = video_file.get('recording_type', 'unknown')
+            download_url = video_file.get('download_url')
+            file_size = video_file.get('file_size', 0)
+            
+            if not download_url:
+                print(f"    ✗ Skipping {file_type}: No download URL")
+                continue
+            
+            filename = f"{file_type}.mp4"
+            output_path = f"{recording_dir}/{filename}"
+            
+            # Skip if already downloaded
+            if os.path.exists(output_path):
+                print(f"    ⊙ Skipping {file_type}: Already exists")
+                continue
+            
+            try:
+                print(f"    ↓ Downloading {file_type} ({file_size / (1024*1024):.1f} MB)...")
+                download_video(download_url, access_token, output_path)
+                print(f"    ✓ Downloaded {file_type}")
+                recording_downloaded += 1
+                total_downloaded += 1
+            except Exception as e:
+                print(f"    ✗ Failed to download {file_type}: {e}")
+        
+        print(f"  ✓ Recording complete: {recording_downloaded}/{len(video_files)} files downloaded")
     
     print(f"\n{'='*60}")
-    print(f"Download complete: {downloaded_count}/3 videos downloaded")
+    print(f"Download complete: {total_downloaded} total video files downloaded")
     print(f"{'='*60}")
 
 
