@@ -53,7 +53,21 @@ Query Params:
   page_size=30
   from={YYYY-MM-DD} (optional)
   to={YYYY-MM-DD} (optional)
+  next_page_token={token} (for pagination)
 ```
+
+**IMPORTANT: Date Range Filtering**
+- **Zoom API applies a default date filter** when `from` and `to` parameters are not specified
+- Default filter is very restrictive (typically only 1-2 days)
+- **Always specify explicit date range** to get all available recordings
+- Recommended: Use 1 year back (`from` = 365 days ago, `to` = today)
+- Example: Without date filter → 1 recording; With 6-month range → 28 recordings
+
+**Pagination**
+- API supports pagination via `next_page_token`
+- Response includes: `page_count`, `page_size`, `total_records`, `next_page_token`
+- If `next_page_token` exists, make additional requests with `next_page_token` parameter
+- Continue until `next_page_token` is null/empty
 
 ### Download Recording
 ```
@@ -63,6 +77,106 @@ Headers:
 ```
 - Download URLs are provided in the `recording_files` array
 - Use streaming download for large files
+
+## Recording Metadata
+
+### Recording Object Fields (for YouTube Title Generation)
+
+Each recording object from the Zoom API contains the following metadata fields:
+
+#### Core Fields (Most Useful for YouTube)
+- **`topic`** (string) - Meeting name/title - **PRIMARY FIELD FOR YOUTUBE TITLE**
+- **`start_time`** (string) - ISO 8601 format: `2025-12-02T17:29:28Z` - **USEFUL FOR DATE IN TITLE**
+- **`duration`** (integer) - Meeting duration in minutes (0 if not available)
+- **`timezone`** (string) - Timezone of the meeting: `Europe/Moscow`, `America/New_York`, etc.
+- **`uuid`** (string) - Unique recording identifier: `DqClgwqMRYmwXuDfFFAkog==`
+- **`id`** (integer) - Meeting ID: `87542522271`
+
+#### Additional Metadata Fields
+- **`account_id`** (string) - Zoom account ID
+- **`host_id`** (string) - Host user ID
+- **`type`** (integer) - Meeting type (e.g., `8` for recurring meetings)
+- **`recording_count`** (integer) - Number of recording files in this meeting
+- **`total_size`** (integer) - Total size of all recording files in bytes
+- **`auto_delete`** (boolean) - Whether recording will auto-delete
+- **`auto_delete_date`** (string) - Date when recording will be auto-deleted: `2026-01-31`
+- **`share_url`** (string) - Public share URL for the recording
+- **`recording_play_passcode`** (string) - Passcode for accessing the recording
+
+### Recording File Object Fields
+
+Each file in the `recording_files` array contains:
+
+#### Core Fields
+- **`recording_type`** (string) - Type of recording: `gallery_view`, `active_speaker`, `shared_screen_with_gallery_view`, etc.
+- **`file_size`** (integer) - File size in bytes
+- **`file_type`** (string) - File format: `MP4`, `M4A`, etc.
+- **`file_extension`** (string) - File extension: `MP4`, `M4A`, etc.
+- **`status`** (string) - Recording status: `completed`, `processing`, etc.
+
+#### Time Information
+- **`recording_start`** (string) - ISO 8601 format: `2025-12-02T17:29:29Z`
+- **`recording_end`** (string) - ISO 8601 format: `2025-12-02T17:29:34Z`
+
+#### Identifiers
+- **`id`** (string) - Unique file identifier: `4a4ff5d0-f599-4713-9e41-215f5b8efa1b`
+- **`meeting_id`** (string) - Meeting UUID (same as recording `uuid`)
+
+#### URLs
+- **`download_url`** (string) - URL to download the file (requires authentication)
+- **`play_url`** (string) - URL to play the file in browser
+
+### Recommended YouTube Title Format
+
+Based on available metadata, recommended title formats:
+
+**Format 1: Simple**
+```
+{topic} - {date}
+```
+Example: `Вместе на полянке - 2025-12-02`
+
+**Format 2: With Time**
+```
+{topic} - {date} {time}
+```
+Example: `Вместе на полянке - 2025-12-02 17:29`
+
+**Format 3: With Duration**
+```
+{topic} - {date} ({duration} min)
+```
+Example: `Вместе на полянке - 2025-12-02 (45 min)`
+
+**Format 4: Full**
+```
+{topic} - {date} {time} ({duration} min)
+```
+Example: `Вместе на полянке - 2025-12-02 17:29 (45 min)`
+
+### Date/Time Parsing Example
+
+```python
+from datetime import datetime
+
+# Parse start_time
+start_time = recording.get('start_time')  # "2025-12-02T17:29:28Z"
+dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+
+# Format for YouTube title
+date_str = dt.strftime("%Y-%m-%d")  # "2025-12-02"
+time_str = dt.strftime("%H:%M")      # "17:29"
+date_time_str = dt.strftime("%Y-%m-%d %H:%M")  # "2025-12-02 17:29"
+
+# Get duration
+duration = recording.get('duration', 0)  # minutes
+
+# Build title
+topic = recording.get('topic', 'Untitled Meeting')
+title = f"{topic} - {date_str} {time_str}"
+if duration > 0:
+    title = f"{topic} - {date_str} {time_str} ({duration} min)"
+```
 
 ## Recording File Types
 
@@ -193,6 +307,14 @@ downloads/
 - **Cause**: Multiple meetings on same day with same topic
 - **Solution**: Include time (HHMM) in filename
 
+### Issue: API returns only 1 recording when more are available
+- **Cause**: Zoom API applies a restrictive default date filter (1-2 days) when no date range is specified
+- **Solution**: Always explicitly set `from` and `to` date parameters when calling the API
+- **Example**: 
+  - Without date filter: Returns only recordings from last 1-2 days
+  - With 6-month range: Returns all recordings from that period
+  - Recommended: Use 1 year range (`from` = 365 days ago, `to` = today) to capture all available recordings
+
 ## Code Patterns
 
 ### Refresh Token Management
@@ -247,6 +369,44 @@ time_str = dt.strftime("%H%M")
 # Create directory for recording
 recording_dir = f"downloads/{date_str}_{time_str}"
 os.makedirs(recording_dir, exist_ok=True)
+```
+
+### List Recordings with Date Range and Pagination
+```python
+def list_recordings(access_token, page_size=30, from_date=None, to_date=None):
+    url = f"https://zoom.us/v2/users/{user_id}/recordings"
+    params = {"page_size": page_size}
+    
+    # IMPORTANT: Always set date range to avoid Zoom's restrictive default filter
+    if from_date:
+        params["from"] = from_date
+    if to_date:
+        params["to"] = to_date
+    
+    all_recordings = []
+    next_page_token = None
+    
+    while True:
+        if next_page_token:
+            params["next_page_token"] = next_page_token
+        
+        response = requests.get(url, headers=headers, params=params)
+        data = response.json()
+        
+        recordings = data.get("meetings", [])
+        all_recordings.extend(recordings)
+        
+        next_page_token = data.get("next_page_token")
+        if not next_page_token:
+            break
+    
+    return all_recordings
+
+# Usage: Always specify date range
+from datetime import timedelta
+to_date = datetime.now().strftime("%Y-%m-%d")
+from_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+recordings = list_recordings(access_token, from_date=from_date, to_date=to_date)
 ```
 
 ## Testing Results

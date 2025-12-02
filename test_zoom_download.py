@@ -3,9 +3,10 @@ import requests
 import base64
 import os
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from gallery_identifier import find_best_gallery_view_file
+import config
 
 # Load environment variables
 load_dotenv()
@@ -134,7 +135,7 @@ def get_zoom_access_token():
     return access_token
 
 
-def list_recordings(access_token):
+def list_recordings(access_token, page_size=30, from_date=None, to_date=None):
     """List recordings for the user."""
     print("\nFetching recordings...")
     
@@ -144,7 +145,13 @@ def list_recordings(access_token):
     }
     
     url = f"https://zoom.us/v2/users/{ZOOM_USER_ID}/recordings"
-    params = {"page_size": 30}
+    params = {"page_size": page_size}
+    
+    # Add date filters if provided
+    if from_date:
+        params["from"] = from_date
+    if to_date:
+        params["to"] = to_date
     
     response = requests.get(url, headers=headers, params=params)
     
@@ -155,10 +162,57 @@ def list_recordings(access_token):
         response.raise_for_status()
     
     data = response.json()
+    
+    # Debug: Print full response structure
+    print(f"  API Response keys: {list(data.keys())}")
+    if "from" in data:
+        print(f"  Date range FROM: {data.get('from')}")
+    if "to" in data:
+        print(f"  Date range TO: {data.get('to')}")
+    if "page_count" in data:
+        print(f"  Total pages: {data.get('page_count')}")
+    if "page_number" in data:
+        print(f"  Current page: {data.get('page_number')}")
+    if "page_size" in data:
+        print(f"  Page size: {data.get('page_size')}")
+    if "total_records" in data:
+        print(f"  Total records: {data.get('total_records')}")
+    if "next_page_token" in data:
+        print(f"  Has next page: {bool(data.get('next_page_token'))}")
+    
     recordings = data.get("meetings", [])
     
-    print(f"✓ Found {len(recordings)} recordings")
-    return recordings
+    print(f"✓ Found {len(recordings)} recordings in this page")
+    
+    # Handle pagination if next_page_token exists
+    all_recordings = recordings.copy()
+    next_page_token = data.get("next_page_token")
+    page_number = 1
+    
+    while next_page_token:
+        print(f"\n  Fetching page {page_number + 1}...")
+        # Create new params for next page (remove old next_page_token if exists)
+        next_params = {"page_size": page_size, "next_page_token": next_page_token}
+        if from_date:
+            next_params["from"] = from_date
+        if to_date:
+            next_params["to"] = to_date
+            
+        response = requests.get(url, headers=headers, params=next_params)
+        response.raise_for_status()
+        
+        page_data = response.json()
+        page_recordings = page_data.get("meetings", [])
+        all_recordings.extend(page_recordings)
+        next_page_token = page_data.get("next_page_token")
+        page_number += 1
+        
+        print(f"  ✓ Found {len(page_recordings)} recordings in page {page_number}")
+    
+    if page_number > 1:
+        print(f"\n✓ Total recordings across all pages: {len(all_recordings)}")
+    
+    return all_recordings
 
 
 def sanitize_filename(name):
@@ -234,6 +288,47 @@ def download_video(download_url, access_token, output_path):
     print(f"✓ Downloaded {file_size / (1024*1024):.2f} MB")
 
 
+def generate_folder_name(recording, template=None):
+    """
+    Generate folder name for a recording based on template.
+    
+    Args:
+        recording: Recording object from Zoom API
+        template: Folder name template (defaults to config.FOLDER_NAME_TEMPLATE)
+    
+    Returns:
+        Sanitized folder name string
+    """
+    if template is None:
+        template = config.FOLDER_NAME_TEMPLATE
+    
+    meeting_topic = recording.get('topic', 'Untitled Meeting')
+    start_time = recording.get('start_time', '')
+    
+    # Parse start_time
+    try:
+        dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+        date_str = dt.strftime("%Y-%m-%d")
+        time_str = dt.strftime("%H-%M")
+        date_time_str = f"{date_str} {time_str}"
+    except (ValueError, AttributeError):
+        dt = datetime.now()
+        date_str = dt.strftime("%Y-%m-%d")
+        time_str = dt.strftime("%H-%M")
+        date_time_str = f"{date_str} {time_str}"
+    
+    # Replace placeholders in template
+    folder_name = template.format(
+        date=date_str,
+        time=time_str,
+        date_time=date_time_str,
+        topic=meeting_topic
+    )
+    
+    # Sanitize folder name for filesystem
+    return sanitize_filename(folder_name)
+
+
 def main():
     """Test downloading videos from Zoom."""
     print("=== Zoom Video Download Test ===\n")
@@ -241,38 +336,131 @@ def main():
     # Get access token
     access_token = get_zoom_access_token()
     
-    # List recordings
-    recordings = list_recordings(access_token)
+    # Use date range from config
+    to_date = datetime.now().strftime("%Y-%m-%d")
+    from_date = (datetime.now() - timedelta(days=config.RECORDINGS_DATE_RANGE_DAYS)).strftime("%Y-%m-%d")
+    
+    print(f"Configuration:")
+    print(f"  Date range: {config.RECORDINGS_DATE_RANGE_DAYS} days")
+    print(f"  Process last {config.LAST_MEETINGS_TO_PROCESS} meetings")
+    print(f"  Folder template: {config.FOLDER_NAME_TEMPLATE}")
+    print(f"  Minimum video length: {config.MIN_VIDEO_LENGTH_SECONDS}s")
+    print(f"\nFetching recordings from {from_date} to {to_date}...")
+    
+    # List recordings with explicit date range to avoid Zoom's restrictive default filter
+    recordings = list_recordings(access_token, from_date=from_date, to_date=to_date)
     
     if not recordings:
         print("\nNo recordings found.")
         return
     
-    # Get last 3 recordings (most recent first)
-    last_3_recordings = recordings[:3]
+    # Get last N recordings (most recent first) based on config
+    if config.LAST_MEETINGS_TO_PROCESS is None:
+        num_to_process = len(recordings)
+        recordings_to_process = recordings
+    else:
+        num_to_process = min(config.LAST_MEETINGS_TO_PROCESS, len(recordings))
+        recordings_to_process = recordings[:num_to_process]
     
     print(f"\n{'='*60}")
-    print(f"Downloading ALL videos from last 3 meetings...")
+    print(f"Found {len(recordings)} total recordings")
+    print(f"Processing last {num_to_process} meeting(s)...")
     print(f"{'='*60}\n")
     
     total_downloaded = 0
+    skipped_recordings = []
     
-    for idx, recording in enumerate(last_3_recordings, 1):
+    for idx, recording in enumerate(recordings_to_process, 1):
         meeting_topic = recording.get('topic', 'Untitled Meeting')
         start_time = recording.get('start_time', '')
         recording_id = recording.get('uuid', '')
         
-        print(f"\n[{idx}/3] Processing: {meeting_topic}")
+        print(f"\n[{idx}/{num_to_process}] Processing: {meeting_topic}")
         print(f"  Start time: {start_time}")
+        print(f"  Recording ID: {recording_id[:8]}...")
         
         recording_files = recording.get("recording_files", [])
+        
+        # Debug: Show all available metadata fields (only for first recording)
+        if idx == 1:
+            print(f"\n  {'='*60}")
+            print(f"  FULL RECORDING METADATA (for YouTube title generation):")
+            print(f"  {'='*60}")
+            for key, value in sorted(recording.items()):
+                if key != 'recording_files':  # Skip the large recording_files array
+                    # Truncate long values for readability
+                    if isinstance(value, str) and len(value) > 100:
+                        display_value = value[:100] + "..."
+                    elif isinstance(value, (list, dict)):
+                        display_value = f"{type(value).__name__} ({len(value)} items)"
+                    else:
+                        display_value = value
+                    print(f"    {key}: {display_value}")
+            
+            # Also show structure of recording_files metadata
+            if recording_files:
+                print(f"\n  RECORDING FILE METADATA (first file example):")
+                first_file = recording_files[0]
+                for key, value in sorted(first_file.items()):
+                    if key != 'download_url':  # Skip download URL
+                        if isinstance(value, str) and len(value) > 100:
+                            display_value = value[:100] + "..."
+                        else:
+                            display_value = value
+                        print(f"    file.{key}: {display_value}")
+            
+            print(f"  {'='*60}\n")
+        
+        if not recording_files:
+            print(f"  ✗ No recording files found in this meeting (skipping)")
+            skipped_recordings.append((meeting_topic, "No recording files"))
+            continue
+        
+        print(f"  Found {len(recording_files)} total recording file(s)")
+        
+        # Show all file types for debugging
+        file_types = [f.get('recording_type', 'unknown') for f in recording_files]
+        print(f"  File types: {', '.join(file_types)}")
         
         # Get all video files (excluding audio_only, timeline, transcripts, etc.)
         video_files = get_all_video_files(recording_files)
         
         if not video_files:
-            print(f"  ✗ No video files found (skipping)")
+            print(f"  ✗ No video files found (only non-video files like audio_only, timeline, etc.)")
+            skipped_recordings.append((meeting_topic, "No video files"))
             continue
+        
+        # Check video duration against minimum length threshold
+        recording_duration_minutes = recording.get('duration', 0)
+        recording_duration_seconds = recording_duration_minutes * 60 if recording_duration_minutes > 0 else 0
+        
+        # If recording duration is not available, try to calculate from video file timestamps
+        if recording_duration_seconds == 0 and video_files:
+            try:
+                # Use the first video file's start/end times as fallback
+                first_video = video_files[0]
+                file_start = first_video.get('recording_start')
+                file_end = first_video.get('recording_end')
+                
+                if file_start and file_end:
+                    start_dt = datetime.fromisoformat(file_start.replace('Z', '+00:00'))
+                    end_dt = datetime.fromisoformat(file_end.replace('Z', '+00:00'))
+                    recording_duration_seconds = int((end_dt - start_dt).total_seconds())
+            except (ValueError, AttributeError, TypeError):
+                pass  # If we can't calculate, duration stays 0
+        
+        # Check if video meets minimum length requirement
+        if config.MIN_VIDEO_LENGTH_SECONDS > 0 and recording_duration_seconds < config.MIN_VIDEO_LENGTH_SECONDS:
+            duration_str = f"{recording_duration_seconds}s" if recording_duration_seconds > 0 else "unknown"
+            print(f"  ✗ Video too short: {duration_str} (minimum: {config.MIN_VIDEO_LENGTH_SECONDS}s)")
+            skipped_recordings.append((meeting_topic, f"Too short ({duration_str})"))
+            continue
+        
+        # Display duration if available
+        if recording_duration_seconds > 0:
+            duration_min = recording_duration_seconds // 60
+            duration_sec = recording_duration_seconds % 60
+            print(f"  Duration: {duration_min}m {duration_sec}s")
         
         # Identify the best file for YouTube upload (for reference)
         best_file = find_best_gallery_view_file(recording_files)
@@ -284,17 +472,11 @@ def main():
             view_type = "Gallery View" if is_gallery else "Speaker View"
             print(f"  → Best for YouTube: {best_type} ({view_type})")
         
-        # Create date/time strings for directory/filename
-        try:
-            dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-            date_str = dt.strftime("%Y-%m-%d")
-            time_str = dt.strftime("%H%M")
-        except (ValueError, AttributeError):
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            time_str = datetime.now().strftime("%H%M")
+        # Generate folder name using template from config
+        folder_name = generate_folder_name(recording)
         
         # Create directory for this recording
-        recording_dir = f"test_downloads/{date_str}_{time_str}"
+        recording_dir = os.path.join(config.DOWNLOAD_DIR, folder_name)
         os.makedirs(recording_dir, exist_ok=True)
         
         # Download all video files
@@ -328,7 +510,14 @@ def main():
         print(f"  ✓ Recording complete: {recording_downloaded}/{len(video_files)} files downloaded")
     
     print(f"\n{'='*60}")
-    print(f"Download complete: {total_downloaded} total video files downloaded")
+    print(f"Download Summary")
+    print(f"{'='*60}")
+    print(f"Total video files downloaded: {total_downloaded}")
+    print(f"Recordings processed: {num_to_process}")
+    if skipped_recordings:
+        print(f"\nSkipped recordings ({len(skipped_recordings)}):")
+        for topic, reason in skipped_recordings:
+            print(f"  - {topic}: {reason}")
     print(f"{'='*60}")
 
 

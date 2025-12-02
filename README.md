@@ -4,13 +4,29 @@ A prototype tool that polls Zoom cloud recordings and uploads Gallery View video
 
 ## Setup
 
-### 1. Install Dependencies
+### 1. Create Virtual Environment
+
+Create and activate a Python virtual environment:
+
+**On macOS/Linux:**
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+**On Windows:**
+```bash
+python -m venv venv
+venv\Scripts\activate
+```
+
+### 2. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure Zoom API Credentials
+### 3. Configure Zoom API Credentials
 
 You need to create a Zoom OAuth app with Client-to-Server authentication to access password-protected recordings.
 
@@ -66,7 +82,7 @@ You need to create a Zoom OAuth app with Client-to-Server authentication to acce
    - Make sure to activate the app in the Zoom Marketplace
    - You may need to publish it (or keep it in development mode for testing)
 
-### 3. Create .env File
+### 4. Create .env File
 
 Copy the example file and fill in your credentials:
 
@@ -86,6 +102,19 @@ ZOOM_USER_ID=your_zoom_email@example.com
 **Note:** `ZOOM_ACCOUNT_ID` is not needed for General OAuth apps.
 
 **Important:** Never commit the `.env` file to git! It contains sensitive credentials.
+
+## Configuration
+
+### Application Settings
+
+The script uses `config.py` for configuration. Key settings:
+
+- **`RECORDINGS_DATE_RANGE_DAYS`** (default: 365) - How many days back to fetch recordings from Zoom API
+- **`LAST_MEETINGS_TO_PROCESS`** (default: 3) - How many most recent meetings to download. Set to `None` to process all.
+- **`FOLDER_NAME_TEMPLATE`** (default: `"{date} {time} - {topic}"`) - Template for naming meeting folders
+- **`DOWNLOAD_DIR`** (default: `"test_downloads"`) - Directory where videos are downloaded
+
+You can override these by setting environment variables with the same names.
 
 ## Testing
 
