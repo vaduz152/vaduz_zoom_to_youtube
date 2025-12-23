@@ -1,10 +1,13 @@
 """Configuration settings for Zoom to YouTube downloader."""
 import os
 from datetime import timedelta
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file in this directory
+# This ensures .env in prototype/zoom_download/ is loaded
+env_path = Path(__file__).parent / ".env"
+load_dotenv(env_path)
 
 # Date range for fetching recordings (depth of meetings requested)
 # Number of days to look back from today
@@ -27,7 +30,14 @@ FOLDER_NAME_TEMPLATE = os.getenv(
 )
 
 # Output directory for downloads
-DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "test_downloads")
+# Default is "../../test_downloads" (relative to this file, pointing to repo root)
+# Or set DOWNLOAD_DIR env var to override
+_default_download_dir = os.getenv("DOWNLOAD_DIR")
+if _default_download_dir is None:
+    # Resolve relative to repo root (two levels up from prototype/zoom_download/)
+    repo_root = Path(__file__).parent.parent.parent
+    _default_download_dir = str(repo_root / "test_downloads")
+DOWNLOAD_DIR = _default_download_dir
 
 # Minimum video length in seconds
 # Videos shorter than this will be skipped

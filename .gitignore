@@ -1,6 +1,11 @@
 # Environment variables
 .env
+
+# Zoom download credentials (prototype/zoom_download/)
 .zoom_refresh_token
+
+# YouTube upload credentials (prototype/youtube_upload/)
+youtube_token.json
 
 # Python
 __pycache__/
@@ -26,6 +31,7 @@ wheels/
 
 # Virtual environments
 venv/
+venv_youtube/
 env/
 ENV/
 .venv
@@ -40,8 +46,9 @@ ENV/
 # Logs
 *.log
 zoom_to_youtube.log
+youtube_uploads_log.txt
 
-# Test downloads
+# Test downloads (root directory)
 test_downloads/
 
 # Processed recordings tracker (optional - you may want to track this)

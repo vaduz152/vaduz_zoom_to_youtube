@@ -4,12 +4,14 @@ import base64
 import os
 import urllib.parse
 from datetime import datetime, timedelta
+from pathlib import Path
 from dotenv import load_dotenv
 from gallery_identifier import find_best_gallery_view_file
 import config
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from .env file in this directory
+env_path = Path(__file__).parent / ".env"
+load_dotenv(env_path)
 
 # Zoom credentials
 ZOOM_CLIENT_ID = os.getenv("ZOOM_CLIENT_ID")
