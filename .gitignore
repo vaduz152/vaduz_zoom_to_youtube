@@ -50,7 +50,8 @@ youtube_uploads_log.txt
 
 # Test downloads (root directory)
 test_downloads/
+downloaded_videos/
 
-# Processed recordings tracker (optional - you may want to track this)
-# processed_recordings.csv
+# Processed recordings tracker
+processed_recordings.csv
 
