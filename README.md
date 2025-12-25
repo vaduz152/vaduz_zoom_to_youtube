@@ -260,4 +260,4 @@ See their respective README files for prototype-specific documentation.
 
 ## License
 
-MIT
+CC0 1.0 — Public Domain Dedication
