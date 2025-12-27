@@ -109,6 +109,25 @@ LOG_FILE=./zoom_to_youtube.log
 
 ### 6. First-Time Authorization
 
+**Important: If running on a remote host via SSH**, you need to set up port forwarding **before** running the script. This allows OAuth redirects to work automatically.
+
+#### Setting Up Port Forwarding (Remote Host Only)
+
+If you're connecting to a remote server via SSH, open a **separate terminal** and run:
+
+```bash
+ssh -L 8080:localhost:8080 -L 8081:localhost:8081 user@remote-host
+```
+
+Replace `user@remote-host` with your actual SSH connection details. Keep this terminal open - closing it will close the port forwarding tunnel.
+
+**What this does:**
+- Creates tunnels from your local machine's ports 8080 and 8081 to the remote host
+- When OAuth redirects to `localhost:8080` or `localhost:8081`, SSH forwards them to the remote server
+- The script can automatically capture authorization codes without manual copying
+
+#### Running Authorization
+
 Run the script once to authorize:
 
 ```bash
@@ -117,16 +136,23 @@ python main.py
 
 **Zoom Authorization:**
 - Script will display an authorization URL
-- Visit the URL in your browser
+- Visit the URL in your browser (on your local machine)
 - Authorize the app
-- Copy the authorization code from the redirect URL
-- Paste it into the script when prompted
+- **With port forwarding:** The code will be captured automatically - you'll see a success page
+- **Without port forwarding:** Copy the authorization code from the redirect URL (even if you see an error page, the code is in the browser's address bar)
+- Paste it into the script when prompted (if automatic capture failed)
 - Refresh token will be saved to `.zoom_refresh_token`
 
 **YouTube Authorization:**
-- Script will open a browser window
+- Script will display an authorization URL
+- Visit the URL in your browser (on your local machine)
 - Sign in and authorize the app
+- **With port forwarding:** The code will be captured automatically - you'll see a success page
+- **Without port forwarding:** Copy the authorization code from the redirect URL (even if you see an error page, the code is in the browser's address bar)
+- Paste it into the script when prompted (if automatic capture failed)
 - Token will be saved to `youtube_token.json`
+
+**Note:** After first-time authorization, tokens are saved and you won't need to authorize again unless tokens expire. Port forwarding is only needed during the initial authorization process.
 
 ## Usage
 
@@ -255,6 +281,7 @@ vaduz_zoom_to_youtube/
 This repository also contains prototype modules in `prototype/`:
 - `prototype/zoom_download/` - Original Zoom download prototype
 - `prototype/youtube_upload/` - Original YouTube upload prototype
+  - Contains `OAUTH_REMOTE_HOST_DEBUGGING.md` - Detailed notes on debugging OAuth flows when running on remote hosts
 
 See their respective README files for prototype-specific documentation.
 

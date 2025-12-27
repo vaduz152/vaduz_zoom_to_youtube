@@ -1,15 +1,17 @@
 """YouTube API client for uploading videos."""
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional, Tuple
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import socket
 import time
+import secrets
 
+import requests
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
@@ -112,6 +114,9 @@ def start_google_oauth_server(port: int = 8081, timeout: int = 300) -> Tuple[Opt
 
 def get_credentials() -> Credentials:
     """Get or refresh YouTube OAuth credentials."""
+    # Set environment variable to allow HTTP for localhost (required for OAuth redirect)
+    os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+    
     token_file = config.YOUTUBE_TOKEN_FILE
     
     creds: Optional[Credentials] = None
@@ -129,31 +134,33 @@ def get_credentials() -> Credentials:
     
     # Need to authorize
     logger.info("YouTube authorization required. Starting OAuth flow...")
-    flow = InstalledAppFlow.from_client_config(
-        {
-            "installed": {
-                "client_id": config.YOUTUBE_CLIENT_ID,
-                "client_secret": config.YOUTUBE_CLIENT_SECRET,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": ["http://localhost:8081/"]
-            }
-        },
-        scopes=SCOPES,
-    )
     
-    # Build authorization URL manually
+    # Use 127.0.0.1 instead of localhost for better compatibility
     port = 8081
-    redirect_uri = f"http://localhost:{port}/"
+    redirect_uri = f"http://127.0.0.1:{port}/"
     
-    # Use login_hint if provided to pre-select account
-    authorization_url, state = flow.authorization_url(
-        access_type='offline',
-        include_granted_scopes='true',
-        redirect_uri=redirect_uri,
-        login_hint=config.YOUTUBE_LOGIN_HINT if config.YOUTUBE_LOGIN_HINT else None,
-        prompt='consent' if config.YOUTUBE_LOGIN_HINT else 'select_account consent'
-    )
+    # Generate state parameter for security
+    state = secrets.token_urlsafe(32)
+    
+    # Manually construct authorization URL with all required parameters
+    auth_params = {
+        'response_type': 'code',
+        'client_id': config.YOUTUBE_CLIENT_ID,
+        'redirect_uri': redirect_uri,
+        'scope': ' '.join(SCOPES),
+        'state': state,
+        'access_type': 'offline',
+        'include_granted_scopes': 'true',
+    }
+    
+    # Add login_hint if provided
+    if config.YOUTUBE_LOGIN_HINT:
+        auth_params['login_hint'] = config.YOUTUBE_LOGIN_HINT
+        auth_params['prompt'] = 'consent'
+    else:
+        auth_params['prompt'] = 'select_account consent'
+    
+    authorization_url = f"https://accounts.google.com/o/oauth2/auth?{urlencode(auth_params)}"
     
     logger.error("\n" + "="*60)
     logger.error("YouTube authorization required!")
@@ -177,9 +184,10 @@ def get_credentials() -> Credentials:
     logger.error("   Even if you see an error page (like 'Connection refused'),")
     logger.error("   LOOK AT YOUR BROWSER'S ADDRESS BAR - it will contain the code!")
     logger.error("\n4. The URL will look like:")
-    logger.error(f"   http://localhost:{port}/?code=ABC123XYZ...")
+    logger.error(f"   http://127.0.0.1:{port}/?code=ABC123XYZ...&state=...")
     logger.error("\n5. Copy everything after 'code=' until the next '&' (if any).")
     logger.error("   Example: If URL is '...?code=ABC123&state=...', copy 'ABC123'")
+    logger.error("   Or paste the full URL - the script will extract the code automatically.")
     logger.error("\n" + "="*60)
     
     # Try to start server and capture code automatically
@@ -188,6 +196,11 @@ def get_credentials() -> Credentials:
     
     authorization_code, captured_state = start_google_oauth_server(port=port, timeout=300)
     
+    # Verify state parameter matches for security
+    if captured_state and captured_state != state:
+        logger.warning(f"State parameter mismatch! Expected: {state}, Got: {captured_state}")
+        logger.warning("This could indicate a security issue. Proceeding with caution...")
+    
     # Use captured state if available, otherwise use the one we generated
     final_state = captured_state if captured_state else state
     
@@ -195,10 +208,10 @@ def get_credentials() -> Credentials:
     if not authorization_code:
         logger.warning("\nAutomatic capture timed out or failed.")
         logger.info("Please manually extract the code from your browser's address bar.")
-        logger.info(f"The URL will look like: http://localhost:{port}/?code=YOUR_CODE_HERE")
+        logger.info(f"The URL will look like: http://127.0.0.1:{port}/?code=YOUR_CODE_HERE&state=...")
         logger.info("You can paste either:")
         logger.info("  - Just the code: ABC123XYZ...")
-        logger.info(f"  - Or the full URL: http://localhost:{port}/?code=ABC123XYZ...")
+        logger.info(f"  - Or the full URL: http://127.0.0.1:{port}/?code=ABC123XYZ...&state=...")
         
         user_input = input("\nPaste the authorization code or full URL here: ").strip()
         
@@ -208,9 +221,13 @@ def get_credentials() -> Credentials:
             query_params = parse_qs(parsed.query)
             if 'code' in query_params:
                 authorization_code = query_params['code'][0]
-                # Use state from URL if available, otherwise use generated state
+                # Verify state parameter if present
                 if 'state' in query_params:
-                    final_state = query_params['state'][0]
+                    url_state = query_params['state'][0]
+                    if url_state != state:
+                        logger.warning(f"State parameter mismatch! Expected: {state}, Got: {url_state}")
+                        logger.warning("This could indicate a security issue. Proceeding with caution...")
+                    final_state = url_state
             else:
                 authorization_code = user_input
         else:
@@ -219,13 +236,30 @@ def get_credentials() -> Credentials:
     if not authorization_code:
         raise Exception("No authorization code provided")
     
-    # Exchange authorization code for credentials
-    # Build the authorization response URL that Google would have redirected to
-    authorization_response = f"{redirect_uri}?code={authorization_code}"
-    if final_state:
-        authorization_response += f"&state={final_state}"
-    flow.fetch_token(authorization_response=authorization_response)
-    creds = flow.credentials
+    # Manual token exchange using requests (as recommended in debugging doc)
+    logger.info("Exchanging authorization code for tokens...")
+    token_data = {
+        'code': authorization_code,
+        'client_id': config.YOUTUBE_CLIENT_ID,
+        'client_secret': config.YOUTUBE_CLIENT_SECRET,
+        'redirect_uri': redirect_uri,
+        'grant_type': 'authorization_code'
+    }
+    
+    response = requests.post('https://oauth2.googleapis.com/token', data=token_data)
+    response.raise_for_status()
+    token_response = response.json()
+    
+    # Create Credentials object from token response
+    creds = Credentials(
+        token=token_response.get('access_token'),
+        refresh_token=token_response.get('refresh_token'),
+        token_uri='https://oauth2.googleapis.com/token',
+        client_id=config.YOUTUBE_CLIENT_ID,
+        client_secret=config.YOUTUBE_CLIENT_SECRET,
+        scopes=SCOPES
+    )
+    
     token_file.write_text(creds.to_json())
     logger.info("YouTube credentials saved")
     return creds
