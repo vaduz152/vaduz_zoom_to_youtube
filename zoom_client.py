@@ -6,6 +6,9 @@ import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Tuple
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+import time
 
 import requests
 
@@ -88,6 +91,92 @@ def get_access_token_from_refresh(refresh_token: str) -> str:
     return access_token
 
 
+class OAuthRedirectHandler(BaseHTTPRequestHandler):
+    """HTTP request handler to capture OAuth redirect."""
+    
+    def do_GET(self):
+        """Handle GET request from OAuth redirect."""
+        parsed_path = urlparse(self.path)
+        query_params = parse_qs(parsed_path.query)
+        
+        if 'code' in query_params:
+            code = query_params['code'][0]
+            self.server.authorization_code = code
+            
+            # Send success response
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(b"""
+                <html>
+                <head><title>Authorization Successful</title></head>
+                <body>
+                    <h1>Authorization Successful!</h1>
+                    <p>You can close this window and return to the terminal.</p>
+                    <p>The authorization code has been captured automatically.</p>
+                </body>
+                </html>
+            """)
+        else:
+            # Error case
+            error = query_params.get('error', ['Unknown error'])[0]
+            self.send_response(400)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(f"""
+                <html>
+                <head><title>Authorization Failed</title></head>
+                <body>
+                    <h1>Authorization Failed</h1>
+                    <p>Error: {error}</p>
+                    <p>Please check the terminal for instructions.</p>
+                </body>
+                </html>
+            """.encode())
+            self.server.authorization_code = None
+    
+    def log_message(self, format, *args):
+        """Suppress default logging."""
+        pass
+
+
+def start_oauth_server(port: int = 8080, timeout: int = 300) -> Optional[str]:
+    """
+    Start a local HTTP server to capture OAuth redirect.
+    Returns the authorization code if captured, None otherwise.
+    """
+    import socket
+    
+    server_address = ('', port)
+    httpd = HTTPServer(server_address, OAuthRedirectHandler)
+    httpd.authorization_code = None
+    httpd.socket.settimeout(1.0)  # Set socket timeout for non-blocking behavior
+    
+    logger.info(f"Starting OAuth redirect server on port {port}...")
+    logger.info("Waiting for authorization (timeout: {} seconds)...".format(timeout))
+    
+    # Set a timeout for the server
+    start_time = time.time()
+    while httpd.authorization_code is None and (time.time() - start_time) < timeout:
+        try:
+            httpd.handle_request()
+            if httpd.authorization_code is not None:
+                break
+        except socket.timeout:
+            # Timeout is expected, continue waiting
+            continue
+    
+    code = httpd.authorization_code
+    httpd.server_close()
+    
+    if code:
+        logger.info("Authorization code captured successfully!")
+    else:
+        logger.warning("Server timed out waiting for authorization code.")
+    
+    return code
+
+
 def get_access_token() -> str:
     """Get OAuth access token using refresh token or guide user through authorization."""
     logger.info("Getting Zoom access token...")
@@ -109,18 +198,67 @@ def get_access_token() -> str:
             token_file.unlink()
     
     # No valid refresh token, need to get authorization code
+    auth_url = get_authorization_url()
+    
+    # Parse redirect URI to get port
+    redirect_uri = config.ZOOM_REDIRECT_URI
+    parsed_uri = urlparse(redirect_uri)
+    port = parsed_uri.port if parsed_uri.port else 8080
+    
     logger.error("\n" + "="*60)
     logger.error("First-time authorization required!")
     logger.error("="*60)
-    logger.error("\n1. Visit this URL in your browser to authorize the app:")
-    logger.error(f"\n   {get_authorization_url()}\n")
-    logger.error("2. After authorizing, you'll be redirected to your redirect URI.")
-    logger.error("3. Copy the 'code' parameter from the redirect URL.")
-    logger.error("   Example: http://localhost:8080/redirect?code=ABC123")
-    logger.error("   The code is: ABC123")
+    logger.error("\nOPTION 1: Automatic (Recommended if using SSH port forwarding)")
+    logger.error("="*60)
+    logger.error("1. If connecting via SSH, set up port forwarding FIRST:")
+    logger.error(f"   ssh -L {port}:localhost:{port} user@remote-host")
+    logger.error("   (Run this in a separate terminal before running the script)")
+    logger.error("\n2. Visit this URL in your browser:")
+    logger.error(f"\n   {auth_url}\n")
+    logger.error("3. Click 'Allow' on the Zoom authorization page.")
+    logger.error("4. The code will be captured automatically - you'll see a success page.")
+    logger.error("\n" + "="*60)
+    logger.error("OPTION 2: Manual (If port forwarding is not available)")
+    logger.error("="*60)
+    logger.error("1. Visit this URL in your browser:")
+    logger.error(f"\n   {auth_url}\n")
+    logger.error("2. Click 'Allow' on the Zoom authorization page.")
+    logger.error("3. IMPORTANT: After clicking 'Allow', Zoom will redirect you.")
+    logger.error("   Even if you see an error page (like 'Connection refused'),")
+    logger.error("   LOOK AT YOUR BROWSER'S ADDRESS BAR - it will contain the code!")
+    logger.error("\n4. The URL will look like:")
+    logger.error("   http://localhost:8080/redirect?code=ABC123XYZ...")
+    logger.error("\n5. Copy everything after 'code=' until the next '&' (if any).")
+    logger.error("   Example: If URL is '...?code=ABC123&state=...', copy 'ABC123'")
     logger.error("\n" + "="*60)
     
-    authorization_code = input("\nPaste the authorization code here: ").strip()
+    # Try to start server and capture code automatically
+    logger.info("\nAttempting to capture authorization code automatically...")
+    logger.info("(If this doesn't work, you can manually paste the code when prompted)")
+    
+    authorization_code = start_oauth_server(port=port, timeout=300)
+    
+    # If automatic capture failed, fall back to manual input
+    if not authorization_code:
+        logger.warning("\nAutomatic capture timed out or failed.")
+        logger.info("Please manually extract the code from your browser's address bar.")
+        logger.info("The URL will look like: http://localhost:8080/redirect?code=YOUR_CODE_HERE")
+        logger.info("You can paste either:")
+        logger.info("  - Just the code: ABC123XYZ...")
+        logger.info("  - Or the full URL: http://localhost:8080/redirect?code=ABC123XYZ...")
+        
+        user_input = input("\nPaste the authorization code or full URL here: ").strip()
+        
+        # Extract code from URL if user pasted full URL
+        if user_input.startswith('http'):
+            parsed = urlparse(user_input)
+            query_params = parse_qs(parsed.query)
+            if 'code' in query_params:
+                authorization_code = query_params['code'][0]
+            else:
+                authorization_code = user_input
+        else:
+            authorization_code = user_input
     
     if not authorization_code:
         raise Exception("No authorization code provided")
