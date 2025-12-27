@@ -120,7 +120,7 @@ Discord webhook operations (new):
 - Returns success/failure status
 
 **Message format:**
-- Formatted message: `"New video: {youtube_url}"`
+- Just the YouTube URL: `{youtube_url}`
 
 ### 6. `video_tracker.py`
 CSV tracking database:

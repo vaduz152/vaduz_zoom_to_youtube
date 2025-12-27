@@ -19,7 +19,8 @@ def send_notification(youtube_url: str) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    message = f"New video: {youtube_url}"
+    # Format Discord message - modify this line to change message format
+    message = f"{youtube_url}"
     
     try:
         response = requests.post(

@@ -154,6 +154,8 @@ python main.py
 
 **Note:** After first-time authorization, tokens are saved and you won't need to authorize again unless tokens expire. Port forwarding is only needed during the initial authorization process.
 
+**Important:** On the first launch, the script will process and send the last 3 videos from Zoom Cloud to Discord (as configured by `LAST_MEETINGS_TO_PROCESS`). Subsequent runs will only process new recordings that haven't been processed yet.
+
 ## Usage
 
 ### Manual Run
