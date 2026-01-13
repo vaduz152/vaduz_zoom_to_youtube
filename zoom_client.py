@@ -17,6 +17,14 @@ from gallery_identifier import find_best_gallery_view_file
 
 logger = logging.getLogger(__name__)
 
+# Import discord_client with error handling to avoid breaking OAuth flow if import fails
+try:
+    import discord_client
+    DISCORD_AVAILABLE = True
+except ImportError:
+    DISCORD_AVAILABLE = False
+    logger.warning("Discord client not available, error notifications will be skipped")
+
 
 def get_authorization_url() -> str:
     """Generate the authorization URL for user to visit."""
@@ -78,6 +86,25 @@ def get_access_token_from_refresh(refresh_token: str) -> str:
     }
     
     response = requests.post("https://zoom.us/oauth/token", headers=headers, data=data)
+    
+    # Check for token expiration/revocation errors before raising
+    if response.status_code != 200:
+        try:
+            error_data = response.json()
+            error_code = error_data.get("error", "")
+            error_description = error_data.get("error_description", "")
+            
+            # Check for token expiration/revocation errors
+            if error_code in ["invalid_grant", "invalid_token"] or "expired" in error_description.lower() or "revoked" in error_description.lower():
+                error_msg = f"{error_code}: {error_description}" if error_description else error_code
+                raise ValueError(f"Refresh token expired or revoked: {error_msg}")
+        except (ValueError, KeyError):
+            # If we can't parse the error or it's not a token expiration error, 
+            # let raise_for_status() handle it
+            # Note: ValueError here means we raised it ourselves for token expiration
+            # If response.json() fails, it will raise on the next call, which is fine
+            pass
+    
     response.raise_for_status()
     
     token_data = response.json()
@@ -192,10 +219,50 @@ def get_access_token() -> str:
             access_token = get_access_token_from_refresh(refresh_token)
             logger.info("Access token obtained from refresh token")
             return access_token
+        except ValueError as e:
+            # Token expired or revoked (specific error from get_access_token_from_refresh)
+            error_str = str(e)
+            logger.error("="*60)
+            logger.error("Zoom refresh token has expired or been revoked!")
+            logger.error("="*60)
+            logger.error(f"Error details: {error_str}")
+            logger.error("\nThe stored credentials are no longer valid.")
+            logger.error("You will need to re-authorize. The OAuth flow will start now...")
+            logger.error("="*60 + "\n")
+            
+            # Send Discord notification about the token error
+            if DISCORD_AVAILABLE:
+                try:
+                    discord_client.send_error_notification(
+                        error_message="Zoom refresh token has expired or been revoked",
+                        error_details=error_str
+                    )
+                except Exception as discord_error:
+                    # Don't let Discord notification failure break the OAuth flow
+                    logger.warning(f"Failed to send Discord notification: {discord_error}")
+            
+            # Delete the invalid token file to force re-authorization
+            if token_file.exists():
+                token_file.unlink()
+                logger.info("Removed invalid token file")
         except Exception as e:
-            logger.warning(f"Refresh token expired or invalid: {e}")
+            # Other errors (network issues, etc.)
+            error_str = str(e)
+            logger.warning(f"Refresh token failed: {error_str}")
             logger.info("Need to re-authorize...")
-            token_file.unlink()
+            
+            # Send Discord notification for other token errors too
+            if DISCORD_AVAILABLE:
+                try:
+                    discord_client.send_error_notification(
+                        error_message="Zoom token refresh failed",
+                        error_details=error_str
+                    )
+                except Exception as discord_error:
+                    logger.warning(f"Failed to send Discord notification: {discord_error}")
+            
+            if token_file.exists():
+                token_file.unlink()
     
     # No valid refresh token, need to get authorization code
     auth_url = get_authorization_url()

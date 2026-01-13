@@ -11,6 +11,7 @@ import secrets
 
 import requests
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -19,6 +20,14 @@ from googleapiclient.http import MediaFileUpload
 import config
 
 logger = logging.getLogger(__name__)
+
+# Import discord_client with error handling to avoid breaking OAuth flow if import fails
+try:
+    import discord_client
+    DISCORD_AVAILABLE = True
+except ImportError:
+    DISCORD_AVAILABLE = False
+    logger.warning("Discord client not available, error notifications will be skipped")
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
@@ -128,9 +137,37 @@ def get_credentials() -> Credentials:
     
     if creds and creds.expired and creds.refresh_token:
         logger.info("Refreshing YouTube credentials...")
-        creds.refresh(Request())
-        token_file.write_text(creds.to_json())
-        return creds
+        try:
+            creds.refresh(Request())
+            token_file.write_text(creds.to_json())
+            return creds
+        except RefreshError as e:
+            # Refresh token has expired or been revoked
+            error_str = str(e)
+            logger.error("="*60)
+            logger.error("YouTube refresh token has expired or been revoked!")
+            logger.error("="*60)
+            logger.error(f"Error details: {error_str}")
+            logger.error("\nThe stored credentials are no longer valid.")
+            logger.error("You will need to re-authorize. The OAuth flow will start now...")
+            logger.error("="*60 + "\n")
+            
+            # Send Discord notification about the token error
+            if DISCORD_AVAILABLE:
+                try:
+                    discord_client.send_error_notification(
+                        error_message="YouTube refresh token has expired or been revoked",
+                        error_details=error_str
+                    )
+                except Exception as discord_error:
+                    # Don't let Discord notification failure break the OAuth flow
+                    logger.warning(f"Failed to send Discord notification: {discord_error}")
+            
+            # Delete the invalid token file to force re-authorization
+            if token_file.exists():
+                token_file.unlink()
+                logger.info("Removed invalid token file")
+            # Fall through to re-authorization flow below
     
     # Need to authorize
     logger.info("YouTube authorization required. Starting OAuth flow...")

@@ -35,3 +35,33 @@ def send_notification(youtube_url: str) -> bool:
         logger.error(f"Failed to send Discord notification: {e}")
         return False
 
+
+def send_error_notification(error_message: str, error_details: Optional[str] = None) -> bool:
+    """
+    Send a Discord notification for errors (e.g., token expiration).
+    
+    Args:
+        error_message: Main error message to display
+        error_details: Optional additional error details
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    # Format Discord message with error information
+    message = f"⚠️ **Error**: {error_message}"
+    if error_details:
+        message += f"\n```\n{error_details}\n```"
+    
+    try:
+        response = requests.post(
+            config.DISCORD_WEBHOOK_URL,
+            json={"content": message},
+            timeout=10
+        )
+        response.raise_for_status()
+        logger.info(f"Discord error notification sent: {error_message}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send Discord error notification: {e}")
+        return False
+
