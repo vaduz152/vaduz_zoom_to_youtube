@@ -8,9 +8,11 @@ Automated system that downloads Zoom cloud recordings and uploads them to YouTub
 - **Smart Video Selection**: Automatically selects the best video (gallery view preferred)
 - **YouTube Upload**: Uploads videos as unlisted to YouTube
 - **Discord Notifications**: Posts YouTube links to Discord channel via webhook
+- **Error Notifications**: Automatically sends Discord alerts when OAuth tokens expire or are revoked
 - **CSV Tracking**: Tracks all processed recordings in a CSV database
 - **Retry Logic**: Automatically retries failed operations on next run
 - **File Cleanup**: Automatically deletes old videos after retention period
+- **Token Management**: Automatically handles token expiration and prompts for re-authorization
 - **Dry Run Mode**: Test without making actual changes
 
 ## Architecture
@@ -152,7 +154,9 @@ python main.py
 - Paste it into the script when prompted (if automatic capture failed)
 - Token will be saved to `youtube_token.json`
 
-**Note:** After first-time authorization, tokens are saved and you won't need to authorize again unless tokens expire. Port forwarding is only needed during the initial authorization process.
+**Note:** After first-time authorization, tokens are saved and you won't need to authorize again unless tokens expire. Port forwarding is only needed during the initial authorization process or when re-authorizing after token expiration.
+
+**Token Expiration:** If tokens expire or are revoked, you'll receive a Discord notification with error details. The script will automatically prompt for re-authorization on the next run. Make sure port forwarding is set up again if you're on a remote host.
 
 **Important:** On the first launch, the script will process and send the last 3 videos from Zoom Cloud to Discord (as configured by `LAST_MEETINGS_TO_PROCESS`). Subsequent runs will only process new recordings that haven't been processed yet.
 
@@ -230,7 +234,12 @@ All processed recordings are tracked in `processed_recordings.csv`:
 - **Download failures**: Recorded in CSV, skipped on next run
 - **Upload failures**: Retried on next run if file exists
 - **Discord failures**: Retried on next run if upload succeeded
-- **Token expiration**: Script will prompt for re-authorization
+- **Token expiration/revocation**: 
+  - Automatically detected for both Zoom and YouTube tokens
+  - Discord notification sent with error details
+  - Invalid token files are removed automatically
+  - Script prompts for re-authorization on next run
+  - OAuth flow starts automatically when tokens expire
 
 ## Troubleshooting
 
@@ -251,6 +260,25 @@ All processed recordings are tracked in `processed_recordings.csv`:
 - Make sure OAuth client is type **Desktop app**
 - Check that YouTube Data API v3 is enabled
 - Delete `youtube_token.json` and re-authorize
+
+### Token Expired or Revoked Error
+If you see errors like `invalid_grant: Token has been expired or revoked`:
+
+**What happens automatically:**
+- Discord notification is sent with error details
+- Invalid token file is removed
+- Script will prompt for re-authorization on next run
+
+**To fix:**
+- **Zoom**: Delete `.zoom_refresh_token` and run the script again to re-authorize
+- **YouTube**: Delete `youtube_token.json` and run the script again to re-authorize
+- Make sure port forwarding is set up if running on a remote host (see "First-Time Authorization" section)
+
+**Common causes:**
+- Refresh token not used for extended period (6+ months for YouTube, varies for Zoom)
+- User changed their account password (revokes all tokens)
+- User manually revoked app access
+- App in "Testing" mode (YouTube refresh tokens expire after 7 days)
 
 ### Multiple Google Accounts / Wrong Account Selected
 - If you have multiple Google accounts logged in and want to use a specific one:
