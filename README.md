@@ -8,7 +8,8 @@ Automated system that downloads Zoom cloud recordings and uploads them to YouTub
 - **Smart Video Selection**: Automatically selects the best video (gallery view preferred)
 - **YouTube Upload**: Uploads videos as unlisted to YouTube
 - **Discord Notifications**: Posts YouTube links to Discord channel via webhook
-- **Error Notifications**: Automatically sends Discord alerts when OAuth tokens expire or are revoked
+- **Error Notifications**: Automatically sends Discord alerts when OAuth tokens expire or are revoked, and after repeated failures
+- **Success Notifications**: Notifies when errors are resolved after multiple failed attempts
 - **CSV Tracking**: Tracks all processed recordings in a CSV database
 - **Retry Logic**: Automatically retries failed operations on next run
 - **File Cleanup**: Automatically deletes old videos after retention period
@@ -102,6 +103,7 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/your_webhook_id/your_webhoo
 LAST_MEETINGS_TO_PROCESS=3
 MIN_VIDEO_LENGTH_SECONDS=60
 VIDEO_RETENTION_DAYS=10
+ERROR_NOTIFICATION_THRESHOLD=3
 DOWNLOAD_DIR=./downloaded_videos
 CSV_TRACKER_PATH=./processed_recordings.csv
 LOG_FILE=./zoom_to_youtube.log
@@ -198,6 +200,7 @@ All configuration is done via environment variables in `.env`:
 | `LAST_MEETINGS_TO_PROCESS` | Number of recent meetings to process | `3` |
 | `MIN_VIDEO_LENGTH_SECONDS` | Minimum video length (0 = no limit) | `60` |
 | `VIDEO_RETENTION_DAYS` | Days to keep videos before cleanup | `10` |
+| `ERROR_NOTIFICATION_THRESHOLD` | Number of consecutive failures before sending Discord notification | `3` |
 | `DOWNLOAD_DIR` | Directory for downloaded videos | `./downloaded_videos` |
 | `CSV_TRACKER_PATH` | Path to CSV tracking file | `./processed_recordings.csv` |
 | `LOG_FILE` | Path to log file | `./zoom_to_youtube.log` |
@@ -228,6 +231,9 @@ All processed recordings are tracked in `processed_recordings.csv`:
 - `discord_notified_at`: Notification timestamp
 - `status`: Current status (`downloaded`, `uploaded`, `notified`, `failed`)
 - `error_message`: Error details if any step failed
+- `failure_count`: Number of consecutive failures (resets on success)
+- `error_notified_at`: Timestamp when error notification was last sent
+- `last_notified_error`: Last error message that triggered a notification
 
 ## Error Handling
 
@@ -240,6 +246,12 @@ All processed recordings are tracked in `processed_recordings.csv`:
   - Invalid token files are removed automatically
   - Script prompts for re-authorization on next run
   - OAuth flow starts automatically when tokens expire
+- **Retry-based notifications**:
+  - After `ERROR_NOTIFICATION_THRESHOLD` consecutive failures (default: 3), a Discord notification is sent
+  - Subsequent failures with the same error message do not trigger additional notifications (prevents spam)
+  - If the error message changes, a new notification is sent
+  - When an error is resolved after multiple failures, a success notification is sent
+  - Failure count resets on successful operations
 
 ## Troubleshooting
 
@@ -279,6 +291,29 @@ If you see errors like `invalid_grant: Token has been expired or revoked`:
 - User changed their account password (revokes all tokens)
 - User manually revoked app access
 - App in "Testing" mode (YouTube refresh tokens expire after 7 days)
+
+### Repeated Failures / Error Notifications
+
+The system tracks consecutive failures for each recording. When a recording fails `ERROR_NOTIFICATION_THRESHOLD` times (default: 3), a Discord notification is sent.
+
+**How it works:**
+- **First 3 failures**: No notification (transient errors are ignored)
+- **After 3 failures**: Discord notification sent with error details
+- **Subsequent failures**: If the error message is the same, no additional notification is sent (prevents spam)
+- **Error changes**: If the error message changes, a new notification is sent
+- **Success after failures**: When an error is resolved after multiple failures, a success notification is sent
+
+**Example notification flow:**
+1. Failure 1, 2, 3 → No notification
+2. Failure 3 (threshold reached) → ⚠️ Error notification sent
+3. Failure 4 (same error) → No notification (error persists)
+4. Failure 5 (different error) → ⚠️ Error notification sent (new error type)
+5. Success → ✅ Success notification sent (error resolved)
+
+**Configuration:**
+- Set `ERROR_NOTIFICATION_THRESHOLD` in `.env` to change when notifications are sent (default: 3)
+- Lower values = more sensitive (notify sooner)
+- Higher values = less sensitive (only notify for persistent issues)
 
 ### Multiple Google Accounts / Wrong Account Selected
 - If you have multiple Google accounts logged in and want to use a specific one:

@@ -19,7 +19,10 @@ CSV_HEADERS = [
     "youtube_url",
     "discord_notified_at",
     "status",
-    "error_message"
+    "error_message",
+    "failure_count",
+    "error_notified_at",
+    "last_notified_error"
 ]
 
 
@@ -47,7 +50,14 @@ class VideoTracker:
         with open(self.csv_path, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                records.append(row)
+                # Ensure backward compatibility: add missing fields if they don't exist
+            if 'failure_count' not in row:
+                row['failure_count'] = '0'
+            if 'error_notified_at' not in row:
+                row['error_notified_at'] = ''
+            if 'last_notified_error' not in row:
+                row['last_notified_error'] = ''
+            records.append(row)
         return records
     
     def _write_all_records(self, records: list[dict]) -> None:
@@ -84,8 +94,13 @@ class VideoTracker:
         meeting_topic: str,
         start_time: str,
         file_path: Path
-    ) -> None:
-        """Record a successful download."""
+    ) -> bool:
+        """
+        Record a successful download.
+        
+        Returns:
+            True if there were previous failures that were resolved, False otherwise
+        """
         records = self._read_all_records()
         
         # Find existing record or create new one
@@ -100,49 +115,103 @@ class VideoTracker:
             record['zoom_uuid'] = zoom_uuid
             record['meeting_topic'] = meeting_topic
             record['start_time'] = start_time
+            record['failure_count'] = '0'
+            record['error_notified_at'] = ''
             records.append(record)
+        
+        # Check if there were previous failures before clearing
+        had_failures = False
+        try:
+            failure_count = int(record.get('failure_count', '0') or '0')
+            had_failures = failure_count >= config.ERROR_NOTIFICATION_THRESHOLD
+        except (ValueError, TypeError):
+            pass
         
         record['file_path'] = str(file_path)
         record['zoom_downloaded_at'] = datetime.now().isoformat()
         record['status'] = 'downloaded'
         record['error_message'] = ''  # Clear any previous errors
+        record['failure_count'] = '0'  # Reset failure count on success
+        record['error_notified_at'] = ''  # Clear notification timestamp
+        record['last_notified_error'] = ''  # Clear last notified error
         
         self._write_all_records(records)
         logger.debug(f"Recorded download: {zoom_uuid}")
+        
+        return had_failures
     
-    def record_upload(self, zoom_uuid: str, youtube_url: str) -> None:
-        """Record a successful upload."""
+    def record_upload(self, zoom_uuid: str, youtube_url: str) -> bool:
+        """
+        Record a successful upload.
+        
+        Returns:
+            True if there were previous failures that were resolved, False otherwise
+        """
         records = self._read_all_records()
         
         for record in records:
             if record['zoom_uuid'] == zoom_uuid:
+                # Check if there were previous failures before clearing
+                had_failures = False
+                try:
+                    failure_count = int(record.get('failure_count', '0') or '0')
+                    had_failures = failure_count >= config.ERROR_NOTIFICATION_THRESHOLD
+                except (ValueError, TypeError):
+                    pass
+                
                 record['youtube_uploaded_at'] = datetime.now().isoformat()
                 record['youtube_url'] = youtube_url
                 record['status'] = 'uploaded'
                 record['error_message'] = ''  # Clear any previous errors
+                record['failure_count'] = '0'  # Reset failure count on success
+                record['error_notified_at'] = ''  # Clear notification timestamp
+                record['last_notified_error'] = ''  # Clear last notified error
                 self._write_all_records(records)
                 logger.debug(f"Recorded upload: {zoom_uuid}")
-                return
+                return had_failures
         
         logger.warning(f"Attempted to record upload for unknown UUID: {zoom_uuid}")
+        return False
     
-    def record_notification(self, zoom_uuid: str) -> None:
-        """Record a successful Discord notification."""
+    def record_notification(self, zoom_uuid: str) -> bool:
+        """
+        Record a successful Discord notification.
+        
+        Returns:
+            True if there were previous failures that were resolved, False otherwise
+        """
         records = self._read_all_records()
         
         for record in records:
             if record['zoom_uuid'] == zoom_uuid:
+                # Check if there were previous failures before clearing
+                had_failures = False
+                try:
+                    failure_count = int(record.get('failure_count', '0') or '0')
+                    had_failures = failure_count >= config.ERROR_NOTIFICATION_THRESHOLD
+                except (ValueError, TypeError):
+                    pass
+                
                 record['discord_notified_at'] = datetime.now().isoformat()
                 record['status'] = 'notified'
                 record['error_message'] = ''  # Clear any previous errors
+                record['failure_count'] = '0'  # Reset failure count on success
+                record['error_notified_at'] = ''  # Clear notification timestamp
+                record['last_notified_error'] = ''  # Clear last notified error
                 self._write_all_records(records)
                 logger.debug(f"Recorded notification: {zoom_uuid}")
-                return
+                return had_failures
         
         logger.warning(f"Attempted to record notification for unknown UUID: {zoom_uuid}")
+        return False
     
-    def record_error(self, zoom_uuid: str, error_message: str, status: str = 'failed') -> None:
-        """Record an error."""
+    def record_error(self, zoom_uuid: str, error_message: str, status: str = 'failed') -> bool:
+        """
+        Record an error and increment failure count.
+        
+        Returns:
+            True if notification should be sent (threshold reached), False otherwise
+        """
         records = self._read_all_records()
         
         # Find existing record or create new one
@@ -155,13 +224,43 @@ class VideoTracker:
         if record is None:
             record = {header: '' for header in CSV_HEADERS}
             record['zoom_uuid'] = zoom_uuid
+            record['failure_count'] = '0'
+            record['error_notified_at'] = ''
+            record['last_notified_error'] = ''
             records.append(record)
+        
+        # Increment failure count
+        try:
+            failure_count = int(record.get('failure_count', '0') or '0')
+        except (ValueError, TypeError):
+            failure_count = 0
+        
+        failure_count += 1
+        
+        # Check previous error message before updating
+        previous_error = record.get('error_message', '')
+        error_notified_at = record.get('error_notified_at', '')
         
         record['status'] = status
         record['error_message'] = str(error_message)
+        record['failure_count'] = str(failure_count)
+        
+        # Check if we should send notification
+        should_notify = False
+        last_notified_error = record.get('last_notified_error', '')
+        
+        if failure_count >= config.ERROR_NOTIFICATION_THRESHOLD:
+            # Only notify if error message is different from the last notified error
+            # This prevents duplicate notifications for the same persistent error
+            if str(error_message) != last_notified_error:
+                should_notify = True
+                record['error_notified_at'] = datetime.now().isoformat()
+                record['last_notified_error'] = str(error_message)
         
         self._write_all_records(records)
-        logger.debug(f"Recorded error: {zoom_uuid} - {error_message}")
+        logger.debug(f"Recorded error: {zoom_uuid} - {error_message} (failure_count: {failure_count})")
+        
+        return should_notify
     
     def get_records_for_retry(self) -> list[dict]:
         """Get records that need retry (failed or incomplete)."""
