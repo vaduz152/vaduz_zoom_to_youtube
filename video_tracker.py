@@ -51,13 +51,13 @@ class VideoTracker:
             reader = csv.DictReader(f)
             for row in reader:
                 # Ensure backward compatibility: add missing fields if they don't exist
-            if 'failure_count' not in row:
-                row['failure_count'] = '0'
-            if 'error_notified_at' not in row:
-                row['error_notified_at'] = ''
-            if 'last_notified_error' not in row:
-                row['last_notified_error'] = ''
-            records.append(row)
+                if 'failure_count' not in row:
+                    row['failure_count'] = '0'
+                if 'error_notified_at' not in row:
+                    row['error_notified_at'] = ''
+                if 'last_notified_error' not in row:
+                    row['last_notified_error'] = ''
+                records.append(row)
         return records
     
     def _write_all_records(self, records: list[dict]) -> None:
