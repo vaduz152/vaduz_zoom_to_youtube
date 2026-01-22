@@ -61,6 +61,11 @@ pip install -r requirements.txt
 5. Create OAuth credentials:
    - Type: **Desktop app**
    - Copy Client ID and Client Secret
+6. **Recommended:** Publish the OAuth app (OAuth consent screen → "Publish App")
+   - Without publishing, refresh tokens expire after 7 days
+   - Publishing extends token lifetime to ~6 months of inactivity
+   - No verification required for personal use
+   - See [Testing vs Published Mode](#youtube-oauth-app-testing-vs-published-mode) for details
 
 ### 4. Configure Discord Webhook
 
@@ -120,14 +125,14 @@ LOG_FILE=./zoom_to_youtube.log
 If you're connecting to a remote server via SSH, open a **separate terminal** and run:
 
 ```bash
-ssh -L 8080:localhost:8080 -L 8081:localhost:8081 user@remote-host
+ssh -L 8080:localhost:8080 -L 8082:localhost:8082 user@remote-host
 ```
 
 Replace `user@remote-host` with your actual SSH connection details. Keep this terminal open - closing it will close the port forwarding tunnel.
 
 **What this does:**
-- Creates tunnels from your local machine's ports 8080 and 8081 to the remote host
-- When OAuth redirects to `localhost:8080` or `localhost:8081`, SSH forwards them to the remote server
+- Creates tunnels from your local machine's ports 8080 and 8082 to the remote host
+- When OAuth redirects to `localhost:8080` or `localhost:8082`, SSH forwards them to the remote server
 - The script can automatically capture authorization codes without manual copying
 
 #### Running Authorization
@@ -291,6 +296,32 @@ If you see errors like `invalid_grant: Token has been expired or revoked`:
 - User changed their account password (revokes all tokens)
 - User manually revoked app access
 - App in "Testing" mode (YouTube refresh tokens expire after 7 days)
+
+### YouTube OAuth App: Testing vs Published Mode
+
+Google OAuth apps have two modes that significantly affect refresh token lifetime:
+
+| Mode | Refresh Token Lifetime | Who Can Authorize |
+|------|------------------------|-------------------|
+| **Testing** | 7 days (expires regardless of use) | Only test users listed in console |
+| **Published** | ~6 months of inactivity | Anyone (but shows warning if unverified) |
+
+**If your YouTube tokens expire every 7 days**, your OAuth app is likely in "Testing" mode.
+
+**To publish your app (no verification required for personal use):**
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Navigate to: **APIs & Services** → **OAuth consent screen**
+3. Click **"Publish App"**
+4. Confirm when warned about verification
+
+**What happens after publishing:**
+- Refresh tokens last much longer (~6 months of inactivity instead of 7 days)
+- You'll see an "This app isn't verified" warning when authorizing
+- Click **"Advanced"** → **"Go to [app name] (unsafe)"** to proceed
+- This warning only appears during authorization, not during normal use
+
+**Note:** Full verification is NOT required for personal use apps that only access your own data. Publishing without verification is sufficient for this automation tool.
 
 ### Repeated Failures / Error Notifications
 

@@ -173,7 +173,7 @@ def get_credentials() -> Credentials:
     logger.info("YouTube authorization required. Starting OAuth flow...")
     
     # Use 127.0.0.1 instead of localhost for better compatibility
-    port = 8081
+    port = 8082
     redirect_uri = f"http://127.0.0.1:{port}/"
     
     # Generate state parameter for security
