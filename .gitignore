@@ -55,3 +55,5 @@ downloaded_videos/
 # Processed recordings tracker
 processed_recordings.csv
 
+# macOS System Files
+.DS_Store
