@@ -346,6 +346,9 @@ The system tracks consecutive failures for each recording. When a recording fail
 - Lower values = more sensitive (notify sooner)
 - Higher values = less sensitive (only notify for persistent issues)
 
+**Note on Zoom processing delays:**
+Zoom cloud recordings can take 2-6 hours to become available via the API after a meeting ends, especially for longer recordings. During this time, the script will report "No suitable video file found" even though the recording exists in the Zoom web portal. With hourly cron runs, a threshold of 3 may trigger false alarms for slow-processing recordings. Consider setting `ERROR_NOTIFICATION_THRESHOLD=5` to allow ~5 hours of retries before alerting, which accommodates most Zoom processing delays while still catching genuine failures the same day.
+
 ### Multiple Google Accounts / Wrong Account Selected
 - If you have multiple Google accounts logged in and want to use a specific one:
   - Set `YOUTUBE_LOGIN_HINT=your_account@gmail.com` in `.env` to pre-select that account

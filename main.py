@@ -85,10 +85,16 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
             _send_error_notification(zoom_uuid, meeting_topic, "No recording files found")
         return
     
+    # Debug: log available recording types
+    available_types = [f.get('recording_type', 'unknown') for f in recording_files]
+    logger.debug(f"Available recording types for {zoom_uuid[:8]}: {available_types}")
+    
     # Find best video file
     best_video = zoom_client.find_best_video(recording_files)
     if not best_video:
+        # Log more details when no suitable video found
         logger.warning(f"No suitable video file found for {meeting_topic}")
+        logger.warning(f"  Recording types present: {available_types}")
         should_notify = tracker.record_error(zoom_uuid, "No suitable video file found")
         if should_notify:
             _send_error_notification(zoom_uuid, meeting_topic, "No suitable video file found")
