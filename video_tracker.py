@@ -68,10 +68,13 @@ class VideoTracker:
             writer.writerows(records)
     
     def is_processed(self, zoom_uuid: str) -> bool:
-        """Check if a recording has been fully processed (downloaded + uploaded + notified)."""
+        """Check if a recording has been fully processed or intentionally skipped."""
         records = self._read_all_records()
         for record in records:
             if record['zoom_uuid'] == zoom_uuid:
+                # Skipped recordings are considered done (e.g., video too short)
+                if record.get('status') == 'skipped':
+                    return True
                 # Check if fully processed
                 return bool(
                     record.get('zoom_downloaded_at') and
@@ -205,6 +208,37 @@ class VideoTracker:
         logger.warning(f"Attempted to record notification for unknown UUID: {zoom_uuid}")
         return False
     
+    def record_skipped(self, zoom_uuid: str, reason: str) -> None:
+        """
+        Record that a recording was intentionally skipped (e.g., video too short).
+        
+        This is not an error — it marks the recording as permanently skipped
+        without incrementing failure count or triggering Discord notifications.
+        """
+        records = self._read_all_records()
+        
+        # Find existing record or create new one
+        record = None
+        for r in records:
+            if r['zoom_uuid'] == zoom_uuid:
+                record = r
+                break
+        
+        if record is None:
+            record = {header: '' for header in CSV_HEADERS}
+            record['zoom_uuid'] = zoom_uuid
+            record['failure_count'] = '0'
+            record['error_notified_at'] = ''
+            record['last_notified_error'] = ''
+            records.append(record)
+        
+        record['status'] = 'skipped'
+        record['error_message'] = str(reason)
+        # Do not increment failure_count — this is expected behavior
+        
+        self._write_all_records(records)
+        logger.info(f"Recorded skip: {zoom_uuid} - {reason}")
+
     def record_error(self, zoom_uuid: str, error_message: str, status: str = 'failed') -> bool:
         """
         Record an error and increment failure count.

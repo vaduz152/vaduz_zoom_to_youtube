@@ -104,9 +104,7 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
     duration_seconds = zoom_client.get_recording_duration_seconds(recording, best_video)
     if config.MIN_VIDEO_LENGTH_SECONDS > 0 and duration_seconds < config.MIN_VIDEO_LENGTH_SECONDS:
         logger.info(f"Video too short ({duration_seconds}s < {config.MIN_VIDEO_LENGTH_SECONDS}s), skipping")
-        should_notify = tracker.record_error(zoom_uuid, f"Video too short: {duration_seconds}s")
-        if should_notify:
-            _send_error_notification(zoom_uuid, meeting_topic, f"Video too short: {duration_seconds}s")
+        tracker.record_skipped(zoom_uuid, f"Video too short: {duration_seconds}s")
         return
     
     # Generate folder name and file path
