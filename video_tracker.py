@@ -91,6 +91,40 @@ class VideoTracker:
                 return record
         return None
     
+    def update_meeting_metadata(
+        self,
+        zoom_uuid: str,
+        meeting_topic: str = '',
+        start_time: str = ''
+    ) -> bool:
+        """
+        Update meeting_topic and start_time for an existing record if they are missing.
+        
+        Returns:
+            True if any field was updated, False otherwise.
+        """
+        if not meeting_topic and not start_time:
+            return False
+        
+        records = self._read_all_records()
+        
+        for record in records:
+            if record['zoom_uuid'] == zoom_uuid:
+                updated = False
+                if meeting_topic and not record.get('meeting_topic'):
+                    record['meeting_topic'] = meeting_topic
+                    updated = True
+                if start_time and not record.get('start_time'):
+                    record['start_time'] = start_time
+                    updated = True
+                
+                if updated:
+                    self._write_all_records(records)
+                    logger.debug(f"Updated metadata for: {zoom_uuid}")
+                return updated
+        
+        return False
+    
     def record_download(
         self,
         zoom_uuid: str,
@@ -116,11 +150,15 @@ class VideoTracker:
         if record is None:
             record = {header: '' for header in CSV_HEADERS}
             record['zoom_uuid'] = zoom_uuid
-            record['meeting_topic'] = meeting_topic
-            record['start_time'] = start_time
             record['failure_count'] = '0'
             record['error_notified_at'] = ''
             records.append(record)
+        
+        # Always update meeting metadata if provided
+        if meeting_topic:
+            record['meeting_topic'] = meeting_topic
+        if start_time:
+            record['start_time'] = start_time
         
         # Check if there were previous failures before clearing
         had_failures = False
@@ -208,7 +246,13 @@ class VideoTracker:
         logger.warning(f"Attempted to record notification for unknown UUID: {zoom_uuid}")
         return False
     
-    def record_skipped(self, zoom_uuid: str, reason: str) -> None:
+    def record_skipped(
+        self,
+        zoom_uuid: str,
+        reason: str,
+        meeting_topic: str = '',
+        start_time: str = ''
+    ) -> None:
         """
         Record that a recording was intentionally skipped (e.g., video too short).
         
@@ -232,6 +276,12 @@ class VideoTracker:
             record['last_notified_error'] = ''
             records.append(record)
         
+        # Store meeting metadata if provided (and not already set)
+        if meeting_topic and not record.get('meeting_topic'):
+            record['meeting_topic'] = meeting_topic
+        if start_time and not record.get('start_time'):
+            record['start_time'] = start_time
+        
         record['status'] = 'skipped'
         record['error_message'] = str(reason)
         # Do not increment failure_count — this is expected behavior
@@ -239,7 +289,14 @@ class VideoTracker:
         self._write_all_records(records)
         logger.info(f"Recorded skip: {zoom_uuid} - {reason}")
 
-    def record_error(self, zoom_uuid: str, error_message: str, status: str = 'failed') -> bool:
+    def record_error(
+        self,
+        zoom_uuid: str,
+        error_message: str,
+        status: str = 'failed',
+        meeting_topic: str = '',
+        start_time: str = ''
+    ) -> bool:
         """
         Record an error and increment failure count.
         
@@ -262,6 +319,12 @@ class VideoTracker:
             record['error_notified_at'] = ''
             record['last_notified_error'] = ''
             records.append(record)
+        
+        # Store meeting metadata if provided (and not already set)
+        if meeting_topic and not record.get('meeting_topic'):
+            record['meeting_topic'] = meeting_topic
+        if start_time and not record.get('start_time'):
+            record['start_time'] = start_time
         
         # Increment failure count
         try:

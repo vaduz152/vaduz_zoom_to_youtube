@@ -59,8 +59,8 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
         dry_run: If True, skip actual operations
     """
     zoom_uuid = recording.get('uuid', '')
-    meeting_topic = recording.get('topic', 'Untitled Meeting')
-    start_time = recording.get('start_time', '')
+    meeting_topic = recording.get('topic') or 'Untitled Meeting'
+    start_time = recording.get('start_time') or ''
     
     if not zoom_uuid:
         logger.warning("Recording missing UUID, skipping")
@@ -70,6 +70,8 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
     
     # Check if already fully processed
     if tracker.is_processed(zoom_uuid):
+        # Backfill missing metadata for older records
+        tracker.update_meeting_metadata(zoom_uuid, meeting_topic, start_time)
         logger.info(f"Already fully processed, skipping: {zoom_uuid[:8]}...")
         return
     
@@ -80,7 +82,10 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
     recording_files = recording.get('recording_files', [])
     if not recording_files:
         logger.warning(f"No recording files found for {meeting_topic}")
-        should_notify = tracker.record_error(zoom_uuid, "No recording files found")
+        should_notify = tracker.record_error(
+            zoom_uuid, "No recording files found",
+            meeting_topic=meeting_topic, start_time=start_time
+        )
         if should_notify:
             _send_error_notification(zoom_uuid, meeting_topic, "No recording files found")
         return
@@ -95,7 +100,10 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
         # Log more details when no suitable video found
         logger.warning(f"No suitable video file found for {meeting_topic}")
         logger.warning(f"  Recording types present: {available_types}")
-        should_notify = tracker.record_error(zoom_uuid, "No suitable video file found")
+        should_notify = tracker.record_error(
+            zoom_uuid, "No suitable video file found",
+            meeting_topic=meeting_topic, start_time=start_time
+        )
         if should_notify:
             _send_error_notification(zoom_uuid, meeting_topic, "No suitable video file found")
         return
@@ -104,7 +112,10 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
     duration_seconds = zoom_client.get_recording_duration_seconds(recording, best_video)
     if config.MIN_VIDEO_LENGTH_SECONDS > 0 and duration_seconds < config.MIN_VIDEO_LENGTH_SECONDS:
         logger.info(f"Video too short ({duration_seconds}s < {config.MIN_VIDEO_LENGTH_SECONDS}s), skipping")
-        tracker.record_skipped(zoom_uuid, f"Video too short: {duration_seconds}s")
+        tracker.record_skipped(
+            zoom_uuid, f"Video too short: {duration_seconds}s",
+            meeting_topic=meeting_topic, start_time=start_time
+        )
         return
     
     # Generate folder name and file path
@@ -131,7 +142,10 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
                     _send_success_notification(zoom_uuid, meeting_topic, "Download")
             except Exception as e:
                 logger.error(f"Download failed: {e}")
-                should_notify = tracker.record_error(zoom_uuid, f"Download failed: {e}")
+                should_notify = tracker.record_error(
+                    zoom_uuid, f"Download failed: {e}",
+                    meeting_topic=meeting_topic, start_time=start_time
+                )
                 if should_notify:
                     _send_error_notification(zoom_uuid, meeting_topic, f"Download failed: {e}")
                 return
@@ -150,7 +164,10 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
                         _send_success_notification(zoom_uuid, meeting_topic, "Download (retry)")
             except Exception as e:
                 logger.error(f"Retry download failed: {e}")
-                should_notify = tracker.record_error(zoom_uuid, f"Retry download failed: {e}")
+                should_notify = tracker.record_error(
+                    zoom_uuid, f"Retry download failed: {e}",
+                    meeting_topic=meeting_topic, start_time=start_time
+                )
                 if should_notify:
                     _send_error_notification(zoom_uuid, meeting_topic, f"Retry download failed: {e}")
                 return
@@ -179,7 +196,10 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
                     _send_success_notification(zoom_uuid, meeting_topic, "Upload")
             except Exception as e:
                 logger.error(f"Upload failed: {e}")
-                should_notify = tracker.record_error(zoom_uuid, f"Upload failed: {e}")
+                should_notify = tracker.record_error(
+                    zoom_uuid, f"Upload failed: {e}",
+                    meeting_topic=meeting_topic, start_time=start_time
+                )
                 if should_notify:
                     _send_error_notification(zoom_uuid, meeting_topic, f"Upload failed: {e}")
                 return
@@ -206,12 +226,18 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
                     if had_failures:
                         _send_success_notification(zoom_uuid, meeting_topic, "Discord notification")
                 else:
-                    should_notify = tracker.record_error(zoom_uuid, "Discord notification failed")
+                    should_notify = tracker.record_error(
+                        zoom_uuid, "Discord notification failed",
+                        meeting_topic=meeting_topic, start_time=start_time
+                    )
                     if should_notify:
                         _send_error_notification(zoom_uuid, meeting_topic, "Discord notification failed")
             except Exception as e:
                 logger.error(f"Discord notification failed: {e}")
-                should_notify = tracker.record_error(zoom_uuid, f"Discord notification failed: {e}")
+                should_notify = tracker.record_error(
+                    zoom_uuid, f"Discord notification failed: {e}",
+                    meeting_topic=meeting_topic, start_time=start_time
+                )
                 if should_notify:
                     _send_error_notification(zoom_uuid, meeting_topic, f"Discord notification failed: {e}")
     else:
@@ -272,7 +298,11 @@ def retry_failed_recordings(tracker: VideoTracker, dry_run: bool = False) -> Non
                         except Exception as e:
                             logger.error(f"Retry upload failed: {e}")
                             meeting_topic = record.get('meeting_topic', 'Unknown Meeting')
-                            should_notify = tracker.record_error(uuid, f"Retry upload failed: {e}")
+                            should_notify = tracker.record_error(
+                                uuid, f"Retry upload failed: {e}",
+                                meeting_topic=record.get('meeting_topic', ''),
+                                start_time=record.get('start_time', '')
+                            )
                             if should_notify:
                                 _send_error_notification(uuid, meeting_topic, f"Retry upload failed: {e}")
         
@@ -294,13 +324,21 @@ def retry_failed_recordings(tracker: VideoTracker, dry_run: bool = False) -> Non
                                 _send_success_notification(uuid, meeting_topic, "Discord notification (retry)")
                         else:
                             meeting_topic = record.get('meeting_topic', 'Unknown Meeting')
-                            should_notify = tracker.record_error(uuid, "Retry Discord notification failed")
+                            should_notify = tracker.record_error(
+                                uuid, "Retry Discord notification failed",
+                                meeting_topic=record.get('meeting_topic', ''),
+                                start_time=record.get('start_time', '')
+                            )
                             if should_notify:
                                 _send_error_notification(uuid, meeting_topic, "Retry Discord notification failed")
                     except Exception as e:
                         logger.error(f"Retry notification failed: {e}")
                         meeting_topic = record.get('meeting_topic', 'Unknown Meeting')
-                        should_notify = tracker.record_error(uuid, f"Retry notification failed: {e}")
+                        should_notify = tracker.record_error(
+                            uuid, f"Retry notification failed: {e}",
+                            meeting_topic=record.get('meeting_topic', ''),
+                            start_time=record.get('start_time', '')
+                        )
                         if should_notify:
                             _send_error_notification(uuid, meeting_topic, f"Retry notification failed: {e}")
 
@@ -371,7 +409,10 @@ def main() -> None:
                 zoom_uuid = recording.get('uuid', '')
                 meeting_topic = recording.get('topic', 'Unknown Meeting')
                 if zoom_uuid:
-                    should_notify = tracker.record_error(zoom_uuid, f"Processing error: {e}")
+                    should_notify = tracker.record_error(
+                        zoom_uuid, f"Processing error: {e}",
+                        meeting_topic=meeting_topic, start_time=recording.get('start_time', '')
+                    )
                     if should_notify:
                         _send_error_notification(zoom_uuid, meeting_topic, f"Processing error: {e}")
         
