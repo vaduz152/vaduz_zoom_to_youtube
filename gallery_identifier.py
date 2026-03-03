@@ -20,46 +20,58 @@ def is_gallery_view(recording_file):
     return recording_type in ["gallery_view", "shared_screen_with_gallery_view"]
 
 
+def _is_file_ready(recording_file):
+    """Check if a recording file has finished processing and is ready for download."""
+    status = recording_file.get("status", "").lower()
+    if status and status != "completed":
+        logger.debug(f"Skipping file with status '{status}': {recording_file.get('recording_type')}")
+        return False
+    return True
+
+
 def find_best_gallery_view_file(recording_files):
     """
     Find the best Gallery View file from a list of recording files.
     Prioritizes shared_screen_with_gallery_view over gallery_view.
     Falls back to active_speaker if no Gallery View is available.
-    
+    Only considers files with status "completed" (skips "processing" etc.).
+
     Args:
         recording_files: List of recording file objects from Zoom API
-    
+
     Returns:
         Best video file (Gallery View preferred, speaker view as fallback), or None if not found
     """
+    ready_files = [f for f in recording_files if _is_file_ready(f)]
+
     # First, try to find shared_screen_with_gallery_view (preferred)
-    for file in recording_files:
+    for file in ready_files:
         recording_type = file.get("recording_type", "").lower()
         if recording_type == "shared_screen_with_gallery_view":
             logger.debug(f"Found preferred Gallery View: shared_screen_with_gallery_view")
             return file
-    
+
     # Fall back to gallery_view
-    for file in recording_files:
+    for file in ready_files:
         recording_type = file.get("recording_type", "").lower()
         if recording_type == "gallery_view":
             logger.debug(f"Found Gallery View: gallery_view")
             return file
-    
+
     # Fall back to active_speaker if no Gallery View found
-    for file in recording_files:
+    for file in ready_files:
         recording_type = file.get("recording_type", "").lower()
         if recording_type == "active_speaker":
             logger.debug(f"Found fallback: active_speaker")
             return file
-    
+
     # Also check for shared_screen_with_speaker_view as fallback
-    for file in recording_files:
+    for file in ready_files:
         recording_type = file.get("recording_type", "").lower()
         if recording_type == "shared_screen_with_speaker_view":
             logger.debug(f"Found fallback: shared_screen_with_speaker_view")
             return file
-    
+
     # No suitable video file found
     logger.debug("No Gallery View or Speaker View file found")
     return None

@@ -97,15 +97,25 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
     # Find best video file
     best_video = zoom_client.find_best_video(recording_files)
     if not best_video:
-        # Log more details when no suitable video found
-        logger.warning(f"No suitable video file found for {meeting_topic}")
+        # Check if files exist but are still processing
+        processing_files = [
+            f for f in recording_files
+            if f.get('status', '').lower() not in ('', 'completed')
+        ]
+        if processing_files:
+            statuses = [f.get('status', 'unknown') for f in processing_files]
+            error_msg = f"Video files still processing (status: {', '.join(statuses)})"
+        else:
+            error_msg = "No suitable video file found"
+
+        logger.warning(f"{error_msg} for {meeting_topic}")
         logger.warning(f"  Recording types present: {available_types}")
         should_notify = tracker.record_error(
-            zoom_uuid, "No suitable video file found",
+            zoom_uuid, error_msg,
             meeting_topic=meeting_topic, start_time=start_time
         )
         if should_notify:
-            _send_error_notification(zoom_uuid, meeting_topic, "No suitable video file found")
+            _send_error_notification(zoom_uuid, meeting_topic, error_msg)
         return
     
     # Check minimum length requirement
