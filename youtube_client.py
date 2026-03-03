@@ -302,6 +302,14 @@ def get_credentials() -> Credentials:
     return creds
 
 
+def _is_retryable_upload_error(e: Exception) -> bool:
+    if isinstance(e, RefreshError):
+        return False
+    if hasattr(e, 'resp') and hasattr(e.resp, 'status'):
+        return e.resp.status not in (400, 403)
+    return True
+
+
 def upload_video(
     video_path: Path,
     title: str,
@@ -311,8 +319,8 @@ def upload_video(
     privacy_status: str = "unlisted",
 ) -> str:
     """
-    Upload a video to YouTube.
-    
+    Upload a video to YouTube with retry on transient errors.
+
     Args:
         video_path: Path to video file
         title: Video title
@@ -320,7 +328,7 @@ def upload_video(
         tags: List of tags (defaults to config value)
         category_id: YouTube category ID (defaults to config value)
         privacy_status: Privacy status (defaults to "unlisted")
-    
+
     Returns:
         YouTube video URL
     """
@@ -330,35 +338,40 @@ def upload_video(
         tags = [t.strip() for t in config.YOUTUBE_DEFAULT_TAGS.split(",") if t.strip()]
     if category_id is None:
         category_id = config.YOUTUBE_CATEGORY_ID
-    
+
     logger.info(f"Uploading video: {video_path.name}")
     logger.info(f"Title: {title}")
-    
-    creds = get_credentials()
-    youtube = build("youtube", "v3", credentials=creds)
-    
-    media = MediaFileUpload(str(video_path), chunksize=4 * 1024 * 1024, resumable=True)
-    body = {
-        "snippet": {
-            "title": title,
-            "description": description,
-            "categoryId": category_id,
-        },
-        "status": {"privacyStatus": privacy_status},
-    }
-    if tags:
-        body["snippet"]["tags"] = tags
-    
-    request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
-    
-    response = None
-    while response is None:
-        status, response = request.next_chunk()
-        if status:
-            logger.info("Upload progress: %.2f%%", status.progress() * 100)
-    
-    video_id = response["id"]
-    youtube_url = f"https://youtu.be/{video_id}"
+
+    def _do_upload():
+        creds = get_credentials()
+        youtube = build("youtube", "v3", credentials=creds)
+
+        media = MediaFileUpload(str(video_path), chunksize=4 * 1024 * 1024, resumable=True)
+        body = {
+            "snippet": {
+                "title": title,
+                "description": description,
+                "categoryId": category_id,
+            },
+            "status": {"privacyStatus": privacy_status},
+        }
+        if tags:
+            body["snippet"]["tags"] = tags
+
+        request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                logger.info("Upload progress: %.2f%%", status.progress() * 100)
+
+        video_id = response["id"]
+        return f"https://youtu.be/{video_id}"
+
+    from utils import retry_with_backoff
+    youtube_url = retry_with_backoff(_do_upload, max_retries=3, delays=(15, 45, 90),
+                                     retryable_check=_is_retryable_upload_error)
     logger.info(f"Upload complete: {youtube_url}")
     return youtube_url
 

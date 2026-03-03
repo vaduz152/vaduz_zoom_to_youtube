@@ -468,23 +468,30 @@ def generate_folder_name(recording: dict, template: str = "{date} {time} - {topi
     return sanitize_filename(folder_name)
 
 
+def _is_retryable_download_error(e: Exception) -> bool:
+    if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
+        return e.response.status_code not in (401, 403, 404)
+    return isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout, IOError))
+
+
 def download_video(download_url: str, access_token: str, output_path: Path) -> None:
-    """Download a video file."""
+    """Download a video file with retry on transient errors."""
     logger.info(f"Downloading to {output_path}...")
-    
-    headers = {
-        "Authorization": f"Bearer {access_token}"
-    }
-    
-    response = requests.get(download_url, headers=headers, stream=True, timeout=300)
-    response.raise_for_status()
-    
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(output_path, 'wb') as f:
-        for chunk in response.iter_content(chunk_size=8192):
-            f.write(chunk)
-    
+
+    def _do_download():
+        headers = {"Authorization": f"Bearer {access_token}"}
+        response = requests.get(download_url, headers=headers, stream=True, timeout=300)
+        response.raise_for_status()
+        with open(output_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+    from utils import retry_with_backoff
+    retry_with_backoff(_do_download, max_retries=3, delays=(10, 30, 60),
+                       retryable_check=_is_retryable_download_error)
+
     file_size = output_path.stat().st_size
     logger.info(f"Downloaded {file_size / (1024*1024):.2f} MB")
 

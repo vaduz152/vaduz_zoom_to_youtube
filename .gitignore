@@ -55,5 +55,8 @@ downloaded_videos/
 # Processed recordings tracker
 processed_recordings.csv
 
+# Transcription prompt (contains project-specific context)
+transcription_prompt.txt
+
 # macOS System Files
 .DS_Store
