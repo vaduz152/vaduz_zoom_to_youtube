@@ -1,0 +1,23 @@
+Transcribe this video with speaker diarization.
+
+Context:
+This is a Zoom meeting recording of a team working on [describe your project].
+Key domain terms: [list domain-specific terms that might be misheard].
+
+Team members (Zoom display names may be in English or Russian, use Russian first names as labels):
+- Иван (Ivan Ivanov / Иван Иванов)
+- Мария (Maria Petrova / Мария Петрова)
+
+Other participants are rare — if you cannot identify a speaker, label them as "Участник 1", "Участник 2", etc.
+
+Rules:
+- Identify speakers by their Zoom display name AND by voice. If the Zoom label is wrong or two people share one camera, distinguish them by voice.
+- Use Russian first names as speaker labels.
+- Include timestamps at the start of each speaker's turn in [MM:SS] format.
+- Transcribe in the original language of the speech (do not translate).
+- Clean up speech for readability: remove filler words, false starts, and repetitions. Preserve meaning and natural tone, but make it easy to read.
+- If multiple people speak simultaneously, note it as [crosstalk].
+
+Format:
+[00:00] Иван: Text of what they said.
+[00:45] Мария: Text of what they said.
