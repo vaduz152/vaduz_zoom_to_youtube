@@ -14,6 +14,7 @@ import time
 
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 
 
 load_dotenv()
@@ -57,6 +58,10 @@ def transcribe_video(video_path: str) -> str:
         return client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[video_file, TRANSCRIPTION_PROMPT],
+            config=types.GenerateContentConfig(
+                max_output_tokens=65536,
+                thinking_config=types.ThinkingConfig(thinking_budget=4096),
+            ),
         )
 
     def _is_retryable(e: Exception):
@@ -75,6 +80,13 @@ def transcribe_video(video_path: str) -> str:
         client.files.delete(name=video_file.name)
     except Exception:
         pass
+
+    # Check if response was truncated
+    finish_reason = None
+    if response.candidates and response.candidates[0].finish_reason:
+        finish_reason = response.candidates[0].finish_reason
+    if finish_reason and str(finish_reason) not in ("STOP", "FinishReason.STOP"):
+        print(f"  Warning: response truncated (finish_reason={finish_reason})")
 
     return response.text
 
