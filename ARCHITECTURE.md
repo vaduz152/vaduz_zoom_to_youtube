@@ -5,29 +5,40 @@
 An automated system that runs hourly via cron to:
 1. Download new Zoom cloud recordings (best video per meeting)
 2. Upload them to YouTube as unlisted videos
-3. Track all operations in a CSV file
-4. Post YouTube links to Discord via webhook
-5. Clean up old videos after retention period
+3. Transcribe video via Gemini API and generate a descriptive title
+4. Update YouTube video title with the generated title
+5. Save transcript to a GitHub repository
+6. Track all operations in a CSV file
+7. Post YouTube link + transcript link to Discord via webhook
+8. Clean up old videos after retention period
 
 ## Project Structure
 
 ```
 vaduz_zoom_to_youtube/
-├── .env                          # Merged credentials (Zoom + YouTube + Discord)
-├── .gitignore                    # Updated to include CSV
+├── .env                          # Merged credentials (Zoom + YouTube + Discord + Gemini)
+├── .gitignore                    # Updated to include CSV, transcripts/
 ├── config.py                     # Configuration settings
 ├── main.py                       # Main entry point (runs on cron)
 ├── zoom_client.py                # Zoom API client
-├── youtube_client.py             # YouTube API client
-├── discord_client.py             # Discord webhook client
+├── youtube_client.py             # YouTube API client (upload + title update)
+├── discord_client.py             # Discord webhook client (template-based)
+├── transcription_client.py       # Gemini API client (transcription + title generation)
+├── transcript_storage.py         # Git-based transcript storage (GitHub)
 ├── video_tracker.py              # CSV tracking logic
 ├── video_manager.py              # File cleanup logic
+├── utils.py                      # Shared utilities (retry_with_backoff)
 ├── requirements.txt              # Dependencies
-├── README.md                     # Updated documentation
+├── README.md                     # Documentation
+├── prompts/                      # Prompt templates (gitignored, .example files committed)
+│   ├── transcription_prompt.txt  # Gemini transcription prompt
+│   ├── title_prompt.txt          # Gemini title generation prompt
+│   └── discord_notification.txt  # Discord message template
 ├── processed_recordings.csv      # Tracking database (gitignored)
 ├── zoom_to_youtube.log           # Log file (gitignored)
+├── transcripts/                  # Local clone of transcripts repo (gitignored)
 └── downloaded_videos/            # Video storage (gitignored)
-    └── {meeting_folder}/
+    └── {date} {time} - {title}/
         └── {best_video}.mp4
 ```
 
@@ -72,16 +83,23 @@ Main entry point - orchestrates the entire flow:
 4. Fetch recordings from Zoom (last N meetings)
 5. For each recording:
    - Check if already processed (by UUID in CSV)
-   - Skip if already fully processed (downloaded + uploaded + notified)
-   - If partially processed (e.g., downloaded but upload failed), retry from failed step
+   - Skip if already fully processed (downloaded + uploaded + transcribed + notified)
+   - If partially processed, retry from failed step
    - Find best video file (gallery view preferred)
    - Check minimum length requirement
    - Download video to `downloaded_videos/{meeting_folder}/` (if not already downloaded)
    - Upload to YouTube (if not already uploaded)
-   - Post YouTube link to Discord (if not already notified)
+   - Transcribe via Gemini API (chunked, 10-min segments)
+   - Generate descriptive title from transcript
+   - Save transcript to GitHub repository
+   - Update YouTube video title (date/time prefix + generated title)
+   - Rename local folder to match new title
+   - Post YouTube link + transcript link to Discord (if not already notified)
    - Record in CSV with all metadata
 6. Clean up old videos (older than retention period)
 7. Exit
+
+**Graceful degradation:** Transcription failure does not block YouTube upload or Discord notification. If transcription fails, Discord message shows `[транскрипт недоступен]` instead of transcript link.
 
 **Command-line arguments:**
 - `--dry-run`: Test mode (no downloads/uploads, just logging)
@@ -105,35 +123,61 @@ YouTube API operations (extracted from prototype):
 
 **Functions:**
 - `get_credentials()` - Get/refresh OAuth credentials
-- `upload_video(video_path, title, description, tags, category_id)` - Upload video
-- Returns YouTube URL
+- `upload_video(video_path, title, description, tags, category_id)` - Upload video, returns YouTube URL
+- `update_video_title(youtube_url, new_title, description)` - Update title of uploaded video
+- `extract_video_id(youtube_url)` - Parse video ID from youtu.be/youtube.com URLs
+
+**Scopes:** `youtube.upload` + `youtube` (full scope needed for title updates)
 
 **Token management:**
 - Uses token stored in `youtube_token.json` (root)
 - Handles token refresh automatically
 
 ### 5. `discord_client.py`
-Discord webhook operations (new):
+Discord webhook operations with customizable template:
 
 **Functions:**
-- `send_notification(youtube_url)` - Post YouTube link to Discord
+- `send_notification(youtube_url, transcript_url, generated_title, meeting_topic)` - Post notification to Discord
+- `send_error_notification(error_message, error_details)` - Post error notification
 - Returns success/failure status
 
-**Message format:**
-- Just the YouTube URL: `{youtube_url}`
+**Message template:** Loaded from `prompts/discord_notification.txt`, uses `str.format()` with variables `{title}`, `{youtube_url}`, `{transcript_url}`. Lines starting with `#` are stripped (comments).
+
+### 5a. `transcription_client.py`
+Gemini API client for video transcription:
+
+**Functions:**
+- `transcribe_video(video_path, duration_seconds)` - Transcribe video (chunked, 10-min segments with 15s overlap). Returns transcript text or `None`
+- `generate_title(transcript)` - Generate descriptive title from transcript. Returns title or `None`
+
+**Chunking:** Videos are split into 10-minute chunks via ffmpeg. Each chunk is uploaded to Gemini File API, transcribed, then deleted. Chunks overlap by 15 seconds for continuity.
+
+**Configuration:** `GEMINI_API_KEY`, `GEMINI_MODEL`, `TRANSCRIPTION_PROMPT_PATH`, `TITLE_PROMPT_PATH`, `MAX_TRANSCRIPTION_DURATION`
+
+### 5b. `transcript_storage.py`
+Git-based transcript storage:
+
+**Functions:**
+- `save_transcript(transcript, folder_name, title)` - Save transcript to GitHub repo, returns GitHub URL or `None`
+- `derive_filename(folder_name, title)` - Generate filename from folder name and title
+
+**Git strategy:** Persistent local clone in `./transcripts/`. On each run: `git pull --rebase` → write file → `git add` + `git commit` + `git push`. Dirty state from failed runs is reset automatically.
+
+**Configuration:** `TRANSCRIPTS_REPO_URL`, `TRANSCRIPTS_REPO_PATH`, `TRANSCRIPTS_GITHUB_REPO`
 
 ### 6. `video_tracker.py`
 CSV tracking database:
 
 **CSV Structure:**
 ```csv
-zoom_uuid,meeting_topic,start_time,file_path,zoom_downloaded_at,youtube_uploaded_at,youtube_url,discord_notified_at,status,error_message
+zoom_uuid,meeting_topic,start_time,file_path,zoom_downloaded_at,youtube_uploaded_at,youtube_url,discord_notified_at,status,error_message,transcribed_at,transcript_url,generated_title
 ```
 
 **Functions:**
-- `is_processed(uuid)` - Check if recording already processed
+- `is_processed(uuid)` - Check if recording already processed (transcription is optional — not required for "processed")
 - `record_download(uuid, meeting_topic, start_time, file_path)` - Record download
 - `record_upload(uuid, youtube_url)` - Record upload
+- `record_transcription(uuid, transcript_url, generated_title)` - Record transcription
 - `record_notification(uuid)` - Record Discord notification
 - `record_error(uuid, error_message)` - Record error
 - `get_all_records()` - Read all records (for cleanup)
@@ -153,20 +197,23 @@ File management and cleanup:
 ## CSV Tracking Schema
 
 ```csv
-zoom_uuid,meeting_topic,start_time,file_path,zoom_downloaded_at,youtube_uploaded_at,youtube_url,discord_notified_at,status,error_message
+zoom_uuid,meeting_topic,start_time,file_path,zoom_downloaded_at,youtube_uploaded_at,youtube_url,discord_notified_at,status,error_message,transcribed_at,transcript_url,generated_title
 ```
 
 **Fields:**
 - `zoom_uuid`: Unique Zoom recording ID (primary key)
 - `meeting_topic`: Meeting name/title
 - `start_time`: ISO 8601 timestamp
-- `file_path`: Local file path relative to repo root (e.g., `downloaded_videos/2025-12-02_1758 - Meeting/active_speaker.mp4`)
+- `file_path`: Local file path relative to repo root
 - `zoom_downloaded_at`: ISO timestamp when downloaded
 - `youtube_uploaded_at`: ISO timestamp when uploaded (empty if failed)
 - `youtube_url`: YouTube video URL (empty if not uploaded)
 - `discord_notified_at`: ISO timestamp when Discord notification sent (empty if failed)
 - `status`: `downloaded`, `uploaded`, `notified`, `failed`
 - `error_message`: Error details if any step failed
+- `transcribed_at`: ISO timestamp when transcribed (empty if not transcribed)
+- `transcript_url`: GitHub URL to transcript (empty if not saved)
+- `generated_title`: Title generated by Gemini (empty if not generated)
 
 ## Video Selection Logic
 
@@ -183,6 +230,7 @@ zoom_uuid,meeting_topic,start_time,file_path,zoom_downloaded_at,youtube_uploaded
 
 - **Download failure**: Record error in CSV, skip to next recording
 - **Upload failure**: Keep video file, record error in CSV with status `failed`, retry on next run (if status is `failed` and file exists, attempt upload again)
+- **Transcription failure**: Log warning, continue to Discord notification with `[транскрипт недоступен]`. Send error notification if error threshold reached
 - **Discord failure**: Record error in CSV, but don't fail entire process, retry on next run if upload succeeded
 - **Token refresh failure**: Log error, exit (requires manual intervention)
 
@@ -231,6 +279,7 @@ YOUTUBE_CLIENT_SECRET=...
 YOUTUBE_DEFAULT_DESCRIPTION=Uploaded via automation
 YOUTUBE_DEFAULT_TAGS=zoom,meeting,recording
 YOUTUBE_CATEGORY_ID=22
+YOUTUBE_LOGIN_HINT=your_google_email@gmail.com
 
 # Discord Webhook
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
@@ -239,9 +288,25 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 LAST_MEETINGS_TO_PROCESS=3
 MIN_VIDEO_LENGTH_SECONDS=60
 VIDEO_RETENTION_DAYS=10
+ERROR_NOTIFICATION_THRESHOLD=5
 DOWNLOAD_DIR=./downloaded_videos
 CSV_TRACKER_PATH=./processed_recordings.csv
 LOG_FILE=./zoom_to_youtube.log
+
+# Gemini API (transcription & title generation)
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_MODEL=gemini-3-pro-preview
+TRANSCRIPTION_PROMPT_PATH=./prompts/transcription_prompt.txt
+TITLE_PROMPT_PATH=./prompts/title_prompt.txt
+MAX_TRANSCRIPTION_DURATION=7200
+
+# Transcript storage (GitHub repo)
+TRANSCRIPTS_REPO_URL=git@github.com:user/meeting-transcripts.git
+TRANSCRIPTS_REPO_PATH=./transcripts
+TRANSCRIPTS_GITHUB_REPO=user/meeting-transcripts
+
+# Discord notification template
+DISCORD_NOTIFICATION_TEMPLATE_PATH=./prompts/discord_notification.txt
 ```
 
 ## Dependencies
@@ -250,6 +315,7 @@ LOG_FILE=./zoom_to_youtube.log
 - `google-auth` - YouTube OAuth
 - `google-auth-oauthlib` - YouTube OAuth flow
 - `google-api-python-client` - YouTube API
+- `google-genai` - Gemini API (transcription, title generation)
 - `python-dotenv` - Environment variable loading
 
 ## Logging

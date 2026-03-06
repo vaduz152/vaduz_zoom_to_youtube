@@ -48,6 +48,25 @@ DOWNLOAD_DIR = Path(get_env("DOWNLOAD_DIR", "./downloaded_videos")).resolve()
 CSV_TRACKER_PATH = Path(get_env("CSV_TRACKER_PATH", "./processed_recordings.csv")).resolve()
 LOG_FILE = Path(get_env("LOG_FILE", "./zoom_to_youtube.log")).resolve()
 
+# Gemini API (transcription & title generation)
+GEMINI_API_KEY = get_env("GEMINI_API_KEY", "")
+GEMINI_MODEL = get_env("GEMINI_MODEL", "gemini-3-pro-preview")
+TRANSCRIPTION_PROMPT_PATH = Path(get_env("TRANSCRIPTION_PROMPT_PATH", "./prompts/transcription_prompt.txt")).resolve()
+TITLE_PROMPT_PATH = Path(get_env("TITLE_PROMPT_PATH", "./prompts/title_prompt.txt")).resolve()
+MAX_TRANSCRIPTION_DURATION = int(get_env("MAX_TRANSCRIPTION_DURATION", "7200"))
+GEMINI_INPUT_PRICE_PER_MTOK = float(get_env("GEMINI_INPUT_PRICE_PER_MTOK", "1.25"))
+GEMINI_OUTPUT_PRICE_PER_MTOK = float(get_env("GEMINI_OUTPUT_PRICE_PER_MTOK", "10.0"))
+
+# Transcript storage (GitHub repo)
+TRANSCRIPTS_REPO_URL = get_env("TRANSCRIPTS_REPO_URL", "")
+TRANSCRIPTS_REPO_PATH = Path(get_env("TRANSCRIPTS_REPO_PATH", "./transcripts")).resolve()
+TRANSCRIPTS_GITHUB_REPO = get_env("TRANSCRIPTS_GITHUB_REPO", "")
+
+# Discord notification template
+DISCORD_NOTIFICATION_TEMPLATE_PATH = Path(get_env(
+    "DISCORD_NOTIFICATION_TEMPLATE_PATH", "./prompts/discord_notification.txt"
+)).resolve()
+
 # Ensure download directory exists
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 

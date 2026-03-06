@@ -7,6 +7,8 @@ from pathlib import Path
 
 import config
 import discord_client
+import transcription_client
+import transcript_storage
 import youtube_client
 import zoom_client
 from video_manager import cleanup_old_videos
@@ -23,6 +25,22 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# Suppress noisy HTTP request logging from httpx and google libs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.WARNING)
+logging.getLogger("google_genai.models").setLevel(logging.WARNING)
+
+
+def _format_meeting_datetime(start_time: str) -> str:
+    """Format ISO start_time as 'YYYY-MM-DD HH:MM'."""
+    if not start_time:
+        return ''
+    try:
+        dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+        return dt.strftime('%Y-%m-%d %H:%M')
+    except (ValueError, AttributeError):
+        return ''
 
 
 def _send_error_notification(zoom_uuid: str, meeting_topic: str, error_message: str) -> None:
@@ -216,20 +234,105 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
     else:
         logger.info(f"Already uploaded: {existing_record.get('youtube_url')}")
     
-    # Step 3: Send Discord notification (if not already notified)
+    # Step 3: Transcribe + generate title + save transcript (if not already done)
+    existing_record = tracker.get_record(zoom_uuid)  # Refresh record
+    transcript_url = existing_record.get('transcript_url', '') if existing_record else ''
+    generated_title = existing_record.get('generated_title', '') if existing_record else ''
+    transcription_cost = ''
+
+    if not existing_record or not existing_record.get('transcribed_at'):
+        if dry_run:
+            logger.info(f"[DRY RUN] Would transcribe: {file_path}")
+        else:
+            try:
+                transcript, usage = transcription_client.transcribe_video(
+                    str(file_path), duration_seconds
+                )
+                if transcript:
+                    generated_title = transcription_client.generate_title(transcript, usage) or ''
+
+                    # Build full title with date/time prefix from folder_name
+                    # folder_name format: "2026-03-06 13-17 - Topic"
+                    if generated_title:
+                        # Extract date/time prefix (everything before " - ")
+                        sep = " - "
+                        if sep in folder_name:
+                            date_time_prefix = folder_name[:folder_name.index(sep)]
+                            full_title = f"{date_time_prefix}{sep}{generated_title}"
+                        else:
+                            full_title = generated_title
+                    else:
+                        full_title = folder_name
+
+                    # Save transcript to GitHub
+                    transcript_url = transcript_storage.save_transcript(
+                        transcript, folder_name, generated_title or None
+                    ) or ''
+
+                    # Update YouTube title if we have a generated title
+                    youtube_url = existing_record.get('youtube_url', '') if existing_record else ''
+                    if generated_title and youtube_url:
+                        description = f"{config.YOUTUBE_DEFAULT_DESCRIPTION}\n\nFolder: {folder_name}"
+                        youtube_client.update_video_title(
+                            youtube_url, full_title, description
+                        )
+
+                    # Rename folder to match generated title
+                    if generated_title and full_title != folder_name:
+                        new_folder_path = config.DOWNLOAD_DIR / full_title
+                        try:
+                            file_path.parent.rename(new_folder_path)
+                            file_path = new_folder_path / file_path.name
+                            folder_name = full_title
+                            logger.info(f"Renamed folder to: {full_title}")
+                        except OSError as e:
+                            logger.warning(f"Could not rename folder: {e}")
+
+                    # Record transcription (store generated title without date prefix)
+                    had_failures = tracker.record_transcription(
+                        zoom_uuid, transcript_url, generated_title
+                    )
+                    transcription_cost = usage.cost_string()
+                    logger.info(f"Transcription complete: {full_title} ({transcription_cost})")
+                    if had_failures:
+                        _send_success_notification(zoom_uuid, meeting_topic, "Transcription")
+                else:
+                    logger.info("Transcription skipped or returned no result")
+            except Exception as e:
+                logger.warning(f"Transcription step failed: {e}")
+                should_notify = tracker.record_error(
+                    zoom_uuid, f"Transcription failed: {e}",
+                    meeting_topic=meeting_topic, start_time=start_time
+                )
+                if should_notify:
+                    _send_error_notification(zoom_uuid, meeting_topic, f"Transcription failed: {e}")
+                # Continue to Discord notification without transcript
+    else:
+        logger.info(f"Already transcribed: {transcript_url}")
+
+    # Step 4: Send Discord notification (if not already notified)
     existing_record = tracker.get_record(zoom_uuid)  # Refresh record
     youtube_url = existing_record.get('youtube_url', '') if existing_record else ''
-    
+    transcript_url = existing_record.get('transcript_url', '') if existing_record else ''
+    generated_title = existing_record.get('generated_title', '') if existing_record else ''
+
     if not existing_record or not existing_record.get('discord_notified_at'):
         if not youtube_url:
             logger.warning("Cannot send Discord notification: no YouTube URL")
             return
-        
+
         if dry_run:
             logger.info(f"[DRY RUN] Would send Discord notification: {youtube_url}")
         else:
             try:
-                success = discord_client.send_notification(youtube_url)
+                success = discord_client.send_notification(
+                    youtube_url,
+                    transcript_url=transcript_url or None,
+                    generated_title=generated_title or None,
+                    meeting_topic=meeting_topic,
+                    meeting_datetime=_format_meeting_datetime(start_time),
+                    transcription_cost=transcription_cost or None,
+                )
                 if success:
                     had_failures = tracker.record_notification(zoom_uuid)
                     logger.info(f"Discord notification sent: {youtube_url}")
@@ -325,7 +428,13 @@ def retry_failed_recordings(tracker: VideoTracker, dry_run: bool = False) -> Non
                     logger.info(f"[DRY RUN] Would retry Discord notification: {youtube_url}")
                 else:
                     try:
-                        success = discord_client.send_notification(youtube_url)
+                        success = discord_client.send_notification(
+                            youtube_url,
+                            transcript_url=record.get('transcript_url') or None,
+                            generated_title=record.get('generated_title') or None,
+                            meeting_topic=record.get('meeting_topic') or None,
+                            meeting_datetime=_format_meeting_datetime(record.get('start_time', '')),
+                        )
                         if success:
                             meeting_topic = record.get('meeting_topic', 'Unknown Meeting')
                             had_failures = tracker.record_notification(uuid)
@@ -408,7 +517,10 @@ def main() -> None:
         )
         
         logger.info(f"Found {len(recordings)} recording(s) to process")
-        
+
+        # Sort by start_time so recordings are processed in chronological order
+        recordings.sort(key=lambda r: r.get('start_time', ''))
+
         # Process each recording
         for idx, recording in enumerate(recordings, 1):
             logger.info(f"\n[{idx}/{len(recordings)}] Processing recording...")

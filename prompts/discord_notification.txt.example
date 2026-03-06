@@ -1,0 +1,13 @@
+# Discord notification template.
+# Uses Python str.format() syntax. Lines starting with # are stripped.
+#
+# Available variables:
+#   {title}           - Generated title (from Gemini), or Zoom meeting topic as fallback
+#   {youtube_url}     - YouTube video URL (e.g. https://youtu.be/abc123)
+#   {transcript_url}  - GitHub transcript URL, or "[транскрипт недоступен]" on error
+#   {datetime}        - Meeting date and time (e.g. 2026-03-06 13:17)
+#   {cost}            - Transcription cost (e.g. $0.15 (12,345 in / 8,421 out))
+**{title}**
+🎬 {youtube_url}
+📝 {transcript_url}
+💰 {cost}

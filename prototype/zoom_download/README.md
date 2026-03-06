@@ -82,7 +82,28 @@ You need to create a Zoom OAuth app with Client-to-Server authentication to acce
    - Make sure to activate the app in the Zoom Marketplace
    - You may need to publish it (or keep it in development mode for testing)
 
-### 4. Create .env File
+### 4. Configure Gemini API (for transcription)
+
+The system uses Google Gemini API to transcribe video recordings and generate titles.
+
+#### Getting a Gemini API key:
+
+1. Go to [Google AI Studio](https://aistudio.google.com/)
+2. Sign in with your Google account
+3. Click "Get API Key" → "Create API key"
+4. Copy the key → `GEMINI_API_KEY` in `.env`
+
+#### Switching to the paid tier:
+
+The free tier has rate limits that may be insufficient for long videos. To switch to paid:
+
+1. Go to [Google AI Studio](https://aistudio.google.com/) → Settings → Billing
+2. Link a Google Cloud billing account
+3. Enable "Pay-as-you-go" for the Gemini API
+
+**Note:** There may be issues when switching to the paid tier — some features or models may not work immediately. If you encounter problems, contact [Billing support](https://support.google.com/googleapi/contact/billing) — they can help resolve configuration issues.
+
+### 5. Create .env File
 
 Create a `.env` file in the script folder with your credentials:
 

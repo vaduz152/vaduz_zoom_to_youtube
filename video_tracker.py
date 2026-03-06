@@ -22,7 +22,10 @@ CSV_HEADERS = [
     "error_message",
     "failure_count",
     "error_notified_at",
-    "last_notified_error"
+    "last_notified_error",
+    "transcribed_at",
+    "transcript_url",
+    "generated_title"
 ]
 
 
@@ -57,6 +60,12 @@ class VideoTracker:
                     row['error_notified_at'] = ''
                 if 'last_notified_error' not in row:
                     row['last_notified_error'] = ''
+                if 'transcribed_at' not in row:
+                    row['transcribed_at'] = ''
+                if 'transcript_url' not in row:
+                    row['transcript_url'] = ''
+                if 'generated_title' not in row:
+                    row['generated_title'] = ''
                 records.append(row)
         return records
     
@@ -246,6 +255,44 @@ class VideoTracker:
         logger.warning(f"Attempted to record notification for unknown UUID: {zoom_uuid}")
         return False
     
+    def record_transcription(
+        self,
+        zoom_uuid: str,
+        transcript_url: str,
+        generated_title: str = ''
+    ) -> bool:
+        """
+        Record a successful transcription.
+
+        Returns:
+            True if there were previous failures that were resolved, False otherwise
+        """
+        records = self._read_all_records()
+
+        for record in records:
+            if record['zoom_uuid'] == zoom_uuid:
+                had_failures = False
+                try:
+                    failure_count = int(record.get('failure_count', '0') or '0')
+                    had_failures = failure_count >= config.ERROR_NOTIFICATION_THRESHOLD
+                except (ValueError, TypeError):
+                    pass
+
+                record['transcribed_at'] = datetime.now().isoformat()
+                record['transcript_url'] = transcript_url
+                record['generated_title'] = generated_title
+                record['status'] = 'transcribed'
+                record['error_message'] = ''
+                record['failure_count'] = '0'
+                record['error_notified_at'] = ''
+                record['last_notified_error'] = ''
+                self._write_all_records(records)
+                logger.debug(f"Recorded transcription: {zoom_uuid}")
+                return had_failures
+
+        logger.warning(f"Attempted to record transcription for unknown UUID: {zoom_uuid}")
+        return False
+
     def record_skipped(
         self,
         zoom_uuid: str,

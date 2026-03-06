@@ -29,7 +29,10 @@ except ImportError:
     DISCORD_AVAILABLE = False
     logger.warning("Discord client not available, error notifications will be skipped")
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube",
+]
 
 
 class GoogleOAuthRedirectHandler(BaseHTTPRequestHandler):
@@ -374,4 +377,71 @@ def upload_video(
                                      retryable_check=_is_retryable_upload_error)
     logger.info(f"Upload complete: {youtube_url}")
     return youtube_url
+
+
+def extract_video_id(youtube_url: str) -> str | None:
+    """Extract video ID from a YouTube URL (youtu.be/ID or youtube.com/watch?v=ID)."""
+    parsed = urlparse(youtube_url)
+    if parsed.hostname in ('youtu.be',):
+        return parsed.path.lstrip('/')
+    if parsed.hostname in ('www.youtube.com', 'youtube.com'):
+        qs = parse_qs(parsed.query)
+        return qs.get('v', [None])[0]
+    return None
+
+
+def update_video_title(
+    youtube_url: str,
+    new_title: str,
+    description: str | None = None,
+) -> bool:
+    """
+    Update the title (and optionally description) of a YouTube video.
+
+    Returns True if successful, False otherwise.
+    """
+    video_id = extract_video_id(youtube_url)
+    if not video_id:
+        logger.error(f"Cannot extract video ID from URL: {youtube_url}")
+        return False
+
+    logger.info(f"Updating YouTube title for {video_id}: {new_title}")
+
+    def _do_update():
+        creds = get_credentials()
+        youtube = build("youtube", "v3", credentials=creds)
+
+        # Get current video details to preserve existing metadata
+        video_response = youtube.videos().list(
+            part="snippet",
+            id=video_id
+        ).execute()
+
+        if not video_response.get("items"):
+            raise ValueError(f"Video not found: {video_id}")
+
+        snippet = video_response["items"][0]["snippet"]
+        snippet["title"] = new_title
+        if description is not None:
+            snippet["description"] = description
+
+        youtube.videos().update(
+            part="snippet",
+            body={
+                "id": video_id,
+                "snippet": snippet,
+            }
+        ).execute()
+
+    try:
+        from utils import retry_with_backoff
+        retry_with_backoff(
+            _do_update, max_retries=3, delays=(5, 15, 30),
+            retryable_check=_is_retryable_upload_error
+        )
+        logger.info(f"YouTube title updated: {new_title}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to update YouTube title: {e}")
+        return False
 

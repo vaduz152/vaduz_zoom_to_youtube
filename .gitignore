@@ -59,5 +59,8 @@ processed_recordings.csv
 prompts/*.txt
 !prompts/*.txt.example
 
+# Local transcripts repo clone
+transcripts/
+
 # macOS System Files
 .DS_Store
