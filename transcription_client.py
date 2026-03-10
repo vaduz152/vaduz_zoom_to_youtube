@@ -134,7 +134,10 @@ async def _transcribe_chunk(
     # Upload to Gemini
     logger.info(f"  [{idx + 1}/{total_chunks}] Uploading chunk {_fmt_time(start)}—{_fmt_time(end)}...")
     video_file = await loop.run_in_executor(
-        None, lambda: client.files.upload(file=chunk_path)
+        None, lambda: retry_with_backoff(
+            lambda: client.files.upload(file=chunk_path),
+            max_retries=3, delays=(15, 45, 90),
+        )
     )
 
     # Wait for processing

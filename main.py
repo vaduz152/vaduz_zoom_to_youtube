@@ -1,5 +1,6 @@
 """Main orchestrator for Zoom to YouTube automation."""
 import argparse
+import fcntl
 import logging
 import sys
 from datetime import datetime, timedelta
@@ -371,6 +372,9 @@ def retry_failed_recordings(tracker: VideoTracker, dry_run: bool = False) -> Non
                         _handle_error(tracker, uuid, meeting_topic, start_time, f"Retry notification failed: {e}")
 
 
+LOCK_FILE = Path(__file__).parent / ".main.lock"
+
+
 def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -387,6 +391,14 @@ def main() -> None:
         help="Increase logging verbosity"
     )
     args = parser.parse_args()
+
+    # Prevent concurrent runs
+    lock_fp = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("Another instance is already running, exiting.", file=sys.stderr)
+        sys.exit(1)
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
