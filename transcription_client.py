@@ -451,7 +451,7 @@ def generate_title(transcript: str, usage: UsageStats | None = None) -> str | No
                 model=config.GEMINI_MODEL,
                 contents=[prompt + "\n\n" + transcript_excerpt],
                 config=types.GenerateContentConfig(
-                    max_output_tokens=256,
+                    max_output_tokens=2048,
                     temperature=0.3,
                 ),
             )
