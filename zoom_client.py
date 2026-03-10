@@ -420,6 +420,15 @@ def is_video_file(recording_file: dict) -> bool:
     return recording_type not in skip_types
 
 
+def find_transcript_file(recording_files: List[dict]) -> Optional[dict]:
+    """Find the VTT transcript file (audio_transcript type) in recording files."""
+    for f in recording_files:
+        if f.get('recording_type', '').lower() == 'audio_transcript':
+            if f.get('status', '').lower() == 'completed':
+                return f
+    return None
+
+
 def find_best_video(recording_files: List[dict]) -> Optional[dict]:
     """
     Find the best video file from a list of recording files.
@@ -474,8 +483,8 @@ def _is_retryable_download_error(e: Exception) -> bool:
     return isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout, IOError))
 
 
-def download_video(download_url: str, access_token: str, output_path: Path) -> None:
-    """Download a video file with retry on transient errors."""
+def download_file(download_url: str, access_token: str, output_path: Path) -> None:
+    """Download a file from Zoom with retry on transient errors."""
     logger.info(f"Downloading to {output_path}...")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

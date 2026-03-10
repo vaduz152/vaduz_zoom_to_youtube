@@ -2,7 +2,7 @@
 
 ## Overview
 
-An automated system that runs hourly via cron to:
+An automated system that runs every 10 minutes via cron to:
 1. Download new Zoom cloud recordings (best video per meeting)
 2. Upload them to YouTube as unlisted videos
 3. Transcribe video via Gemini API and generate a descriptive title
@@ -31,15 +31,20 @@ vaduz_zoom_to_youtube/
 ├── requirements.txt              # Dependencies
 ├── README.md                     # Documentation
 ├── prompts/                      # Prompt templates (gitignored, .example files committed)
-│   ├── transcription_prompt.txt  # Gemini transcription prompt
+│   ├── transcription_prompt.txt  # Gemini transcription prompt (with VTT placeholders)
+│   ├── transcription_prompt.txt.example  # Anonymized example
 │   ├── title_prompt.txt          # Gemini title generation prompt
 │   └── discord_notification.txt  # Discord message template
 ├── processed_recordings.csv      # Tracking database (gitignored)
 ├── zoom_to_youtube.log           # Log file (gitignored)
 ├── transcripts/                  # Local clone of transcripts repo (gitignored)
+├── prototype/                    # Prototypes and experiments
+│   ├── vtt_speaker_hints/        # VTT speaker hints prototype
+│   └── ...
 └── downloaded_videos/            # Video storage (gitignored)
     └── {date} {time} - {title}/
-        └── {best_video}.mp4
+        ├── {best_video}.mp4
+        └── zoom_transcript.vtt   # Zoom VTT for speaker hints
 ```
 
 ## Components
@@ -87,9 +92,12 @@ Main entry point - orchestrates the entire flow:
    - If partially processed, retry from failed step
    - Find best video file (gallery view preferred)
    - Check minimum length requirement
-   - Download video to `downloaded_videos/{meeting_folder}/` (if not already downloaded)
+   - **Detect video readiness** → record `video_ready_at` in CSV
+   - **Check VTT readiness** → if VTT not yet available, skip (wait for next run)
+   - **Record VTT readiness** → record `vtt_ready_at` in CSV, log delay
+   - Download video + VTT to `downloaded_videos/{meeting_folder}/`
    - Upload to YouTube (if not already uploaded)
-   - Transcribe via Gemini API (chunked, 10-min segments)
+   - Transcribe via Gemini API (chunked, 10-min segments with VTT speaker hints)
    - Generate descriptive title from transcript
    - Save transcript to GitHub repository
    - Update YouTube video title (date/time prefix + generated title)
@@ -111,8 +119,9 @@ Zoom API operations (extracted from prototype):
 **Functions:**
 - `get_access_token()` - Get/refresh OAuth token
 - `list_recordings(limit=None, from_date=None, to_date=None)` - Fetch recordings
-- `download_video(download_url, output_path)` - Download video file
+- `download_file(download_url, output_path)` - Download any recording file (video or VTT)
 - `find_best_video(recording_files)` - Select best video (gallery view preferred)
+- `find_transcript_file(recording_files)` - Find VTT audio transcript in recording files
 
 **Token management:**
 - Uses refresh token stored in `.zoom_refresh_token` (root)
@@ -144,11 +153,18 @@ Discord webhook operations with customizable template:
 **Message template:** Loaded from `prompts/discord_notification.txt`, uses `str.format()` with variables `{title}`, `{youtube_url}`, `{transcript_url}`. Lines starting with `#` are stripped (comments).
 
 ### 5a. `transcription_client.py`
-Gemini API client for video transcription:
+Gemini API client for video transcription with VTT speaker hints:
 
 **Functions:**
-- `transcribe_video(video_path, duration_seconds)` - Transcribe video (chunked, 10-min segments with 15s overlap). Returns transcript text or `None`
+- `transcribe_video(video_path, duration_seconds, vtt_path)` - Transcribe video with optional VTT speaker hints (chunked, 10-min segments with 15s overlap). Returns transcript text or `None`
 - `generate_title(transcript)` - Generate descriptive title from transcript. Returns title or `None`
+- `parse_vtt(vtt_text)` - Parse VTT content into structured entries with speaker names and timestamps
+
+**VTT Speaker Hints:** Zoom's audio transcript (VTT) has accurate speaker names from audio channels but garbled text. Gemini has good speech recognition but misidentifies speakers. Combining both: VTT fragments are extracted per-chunk and passed alongside the video for speaker attribution. This fixes ~90% of speaker attribution errors.
+
+**Timestamp handling:** Gemini writes timestamps relative to chunk start (00:00). The script applies absolute offsets post-hoc via `_add_offset_to_transcript()`.
+
+**Prompt template:** Uses `{chunk_info}` and `{vtt_segment}` placeholders, filled per-chunk from the VTT data.
 
 **Chunking:** Videos are split into 10-minute chunks via ffmpeg. Each chunk is uploaded to Gemini File API, transcribed, then deleted. Chunks overlap by 15 seconds for continuity.
 
@@ -175,6 +191,8 @@ zoom_uuid,meeting_topic,start_time,file_path,zoom_downloaded_at,youtube_uploaded
 
 **Functions:**
 - `is_processed(uuid)` - Check if recording already processed (transcription is optional — not required for "processed")
+- `record_video_ready(uuid, meeting_topic, start_time)` - Record when video first appeared in Zoom cloud
+- `record_vtt_ready(uuid)` - Record when VTT transcript appeared (logs delay from video readiness)
 - `record_download(uuid, meeting_topic, start_time, file_path)` - Record download
 - `record_upload(uuid, youtube_url)` - Record upload
 - `record_transcription(uuid, transcript_url, generated_title)` - Record transcription
@@ -197,7 +215,7 @@ File management and cleanup:
 ## CSV Tracking Schema
 
 ```csv
-zoom_uuid,meeting_topic,start_time,file_path,zoom_downloaded_at,youtube_uploaded_at,youtube_url,discord_notified_at,status,error_message,transcribed_at,transcript_url,generated_title
+zoom_uuid,meeting_topic,start_time,file_path,zoom_downloaded_at,youtube_uploaded_at,youtube_url,discord_notified_at,status,error_message,transcribed_at,transcript_url,generated_title,failure_count,error_notified_at,last_notified_error,video_ready_at,vtt_ready_at
 ```
 
 **Fields:**
@@ -209,11 +227,16 @@ zoom_uuid,meeting_topic,start_time,file_path,zoom_downloaded_at,youtube_uploaded
 - `youtube_uploaded_at`: ISO timestamp when uploaded (empty if failed)
 - `youtube_url`: YouTube video URL (empty if not uploaded)
 - `discord_notified_at`: ISO timestamp when Discord notification sent (empty if failed)
-- `status`: `downloaded`, `uploaded`, `notified`, `failed`
+- `status`: `waiting_for_vtt`, `downloaded`, `uploaded`, `notified`, `failed`
 - `error_message`: Error details if any step failed
 - `transcribed_at`: ISO timestamp when transcribed (empty if not transcribed)
 - `transcript_url`: GitHub URL to transcript (empty if not saved)
 - `generated_title`: Title generated by Gemini (empty if not generated)
+- `failure_count`: Number of consecutive failures (resets on success)
+- `error_notified_at`: Timestamp when error notification was last sent
+- `last_notified_error`: Last error message that triggered a notification
+- `video_ready_at`: ISO timestamp when video first appeared in Zoom cloud
+- `vtt_ready_at`: ISO timestamp when VTT transcript first appeared in Zoom cloud
 
 ## Video Selection Logic
 
@@ -242,11 +265,13 @@ zoom_uuid,meeting_topic,start_time,file_path,zoom_downloaded_at,youtube_uploaded
 ## Cron Configuration
 
 ```bash
-# Run every hour at minute 0
-0 * * * * cd /path/to/vaduz_zoom_to_youtube && /path/to/venv/bin/python main.py >> /path/to/zoom_to_youtube.log 2>&1
+# Run every 10 minutes
+*/10 * * * * cd /path/to/vaduz_zoom_to_youtube && /path/to/venv/bin/python main.py >> /path/to/zoom_to_youtube.log 2>&1
 ```
 
-Note: The script also writes to its own log file configured in `LOG_FILE` environment variable.
+Frequent runs are needed because the Zoom VTT transcript appears with a delay after the video is ready. The script detects video readiness first, then waits for the VTT on subsequent runs before downloading and processing.
+
+Note: The script also writes to its own log file configured in `LOG_FILE` environment variable. File locking (`fcntl`) prevents concurrent runs.
 
 ## Dry Run Mode
 

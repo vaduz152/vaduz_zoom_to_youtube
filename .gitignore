@@ -36,12 +36,16 @@ env/
 ENV/
 .venv
 
-# IDE
+# IDE & tools
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
+
+# Lock file
+.main.lock
 
 # Logs
 *.log

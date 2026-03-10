@@ -4,20 +4,36 @@ Context:
 This is a Zoom meeting recording of a team working on [describe your project].
 Key domain terms: [list domain-specific terms that might be misheard].
 
-Team members (Zoom display names may be in English or Russian, use Russian first names as labels):
+Team members (Zoom display names may be in English or other languages, use short first names as labels):
 - Иван (Ivan Ivanov / Иван Иванов)
 - Мария (Maria Petrova / Мария Петрова)
 
-Other participants are rare — if you cannot identify a speaker, label them as "Участник 1", "Участник 2", etc.
-
-Rules:
+Diarization rules:
+- Not all the team members are present every meeting.
+- Participants other than mentioned above are rare.
+— If you cannot identify a speaker, label them as "Участник 1", "Участник 2", etc.
+- If multiple people speak simultaneously, note it as [crosstalk].
 - Identify speakers by their Zoom display name AND by voice. If the Zoom label is wrong or two people share one camera, distinguish them by voice.
-- Use Russian first names as speaker labels.
+- In the end of the prompt you will find a Zoom transcript. Use it to define speakers, but note that Zoom knows nothing about people sharing one camera.
+
+Transcribe rules:
+- Use short first names as speaker labels (Иван, Мария, etc.).
 - Include timestamps at the start of each speaker's turn in [MM:SS] format.
 - Transcribe in the original language of the speech (do not translate).
 - Clean up speech for readability: remove filler words, false starts, and repetitions. Preserve meaning and natural tone, but make it easy to read.
-- If multiple people speak simultaneously, note it as [crosstalk].
+- The transcribed text from the Zoom transcript is low quality in terms of words recognition, don't rely on it.
 
-Format:
-[00:00] Иван: Text of what they said.
-[00:45] Мария: Text of what they said.
+Transcript format (separate each line with a blank line, bold speaker names for markdown):
+
+[00:00] **Иван:** Text of what they said.
+
+[00:45] **Мария:** Text of what they said.
+
+## Chunk info
+{chunk_info}
+
+## Zoom audio transcript (for speaker identification)
+
+```
+{vtt_segment}
+```

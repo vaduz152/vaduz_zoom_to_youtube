@@ -1,6 +1,7 @@
-"""Gemini-based video transcription and title generation."""
+"""Gemini-based video transcription and title generation with VTT speaker hints."""
 import asyncio
 import logging
+import re
 import shutil
 import subprocess
 import time
@@ -62,6 +63,95 @@ def _fmt_time(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+# --- VTT parsing ---
+
+def _parse_vtt_ts(ts: str) -> float | None:
+    """Parse VTT timestamp 'HH:MM:SS.mmm' to seconds."""
+    try:
+        parts = ts.replace(",", ".").split(":")
+        if len(parts) == 3:
+            h, m, s = parts
+            return int(h) * 3600 + int(m) * 60 + float(s)
+        elif len(parts) == 2:
+            m, s = parts
+            return int(m) * 60 + float(s)
+    except (ValueError, IndexError):
+        return None
+    return None
+
+
+def parse_vtt(vtt_text: str) -> list[dict]:
+    """Parse VTT content into list of {start_seconds, end_seconds, speaker, text}."""
+    entries = []
+    blocks = vtt_text.strip().split("\n\n")
+    for block in blocks:
+        lines = block.strip().split("\n")
+        ts_line = None
+        text_lines = []
+        for line in lines:
+            if " --> " in line:
+                ts_line = line
+            elif ts_line is not None:
+                text_lines.append(line)
+        if not ts_line or not text_lines:
+            continue
+        parts = ts_line.split(" --> ")
+        start = _parse_vtt_ts(parts[0].strip())
+        end = _parse_vtt_ts(parts[1].strip())
+        if start is None or end is None:
+            continue
+        text = " ".join(text_lines)
+        speaker = ""
+        if ": " in text:
+            maybe_speaker, rest = text.split(": ", 1)
+            if len(maybe_speaker) < 40 and not any(c.isdigit() for c in maybe_speaker):
+                speaker = maybe_speaker
+                text = rest
+        entries.append({
+            "start_seconds": start,
+            "end_seconds": end,
+            "speaker": speaker,
+            "text": text,
+        })
+    return entries
+
+
+def _extract_vtt_segment(entries: list[dict], start_sec: float, end_sec: float) -> str:
+    """Extract VTT entries for a time range, with timestamps relative to chunk start."""
+    relevant = [
+        e for e in entries
+        if e["end_seconds"] >= start_sec and e["start_seconds"] <= end_sec
+    ]
+    if not relevant:
+        return ""
+    lines = []
+    for e in relevant:
+        local_ts = e["start_seconds"] - start_sec
+        ts = _fmt_time(max(0, local_ts))
+        speaker = e["speaker"] or "(unknown)"
+        lines.append(f"[{ts}] {speaker}: {e['text']}")
+    return "\n".join(lines)
+
+
+# --- Timestamp offset ---
+
+def _add_offset_to_transcript(transcript: str, offset_seconds: int) -> str:
+    """Add time offset to all [MM:SS] or [H:MM:SS] timestamps in transcript."""
+    def replace_ts(match):
+        ts_str = match.group(1)
+        parts = ts_str.split(":")
+        if len(parts) == 3:
+            secs = int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        else:
+            secs = int(parts[0]) * 60 + int(parts[1])
+        secs += offset_seconds
+        return f"[{_fmt_time(secs)}]"
+
+    return re.sub(r'\[(\d+:\d+(?::\d+)?)\]', replace_ts, transcript)
+
+
+# --- Video utils ---
+
 def _get_video_duration(video_path: str) -> float:
     """Get video duration in seconds via ffprobe."""
     result = subprocess.run(
@@ -115,16 +205,23 @@ def _split_video(video_path: str, chunk_minutes: int = CHUNK_MINUTES) -> list[di
     return chunks
 
 
+# --- Transcription ---
+
 async def _transcribe_chunk(
     client: genai.Client,
     chunk: dict,
-    prompt: str,
+    prompt_template: str,
     model: str,
+    vtt_entries: list[dict] | None = None,
     prev_tail: str = "",
     total_chunks: int = 1,
     usage: UsageStats | None = None,
 ) -> tuple[str, str]:
-    """Transcribe one video chunk. Returns (transcript_text, tail_for_next_chunk)."""
+    """Transcribe one video chunk with optional VTT speaker hints.
+
+    Gemini writes timestamps relative to chunk start (00:00).
+    Caller adds the absolute offset afterwards via _add_offset_to_transcript.
+    """
     loop = asyncio.get_event_loop()
     chunk_path = chunk["path"]
     start = chunk["start_seconds"]
@@ -150,15 +247,11 @@ async def _transcribe_chunk(
     if video_file.state != "ACTIVE":
         raise Exception(f"File processing failed for chunk {idx}: {video_file.state}")
 
-    # Build chunk context
-    chunk_context = f"""
-- This is chunk {idx + 1} of {total_chunks}
-- Time range in original video: {_fmt_time(start)} — {_fmt_time(end)}
-- ALL timestamps in transcript must be ABSOLUTE (from the start of the original video). Add {_fmt_time(start)} offset to what you see in this chunk.
-"""
+    # Build chunk info
+    chunk_info = f"- This is chunk {idx + 1} of {total_chunks}."
 
     if prev_tail:
-        chunk_context += f"""
+        chunk_info += f"""
 - End of previous chunk (for context, DO NOT repeat):
 ```
 {prev_tail}
@@ -166,12 +259,23 @@ async def _transcribe_chunk(
 """
 
     if idx == 0:
-        chunk_context += "\n- This is the BEGINNING of the recording."
-
+        chunk_info += "\n- This is the first chunk."
     if idx == total_chunks - 1:
-        chunk_context += "\n- This is the END of the recording. Transcribe until the very end, including goodbyes."
+        chunk_info += "\n- This is the last chunk. Transcribe until the very end, including goodbyes."
 
-    full_prompt = prompt + "\n\n## Chunk info\n" + chunk_context
+    # Build VTT segment
+    vtt_segment = ""
+    if vtt_entries:
+        vtt_segment = _extract_vtt_segment(vtt_entries, start, end)
+        if vtt_segment:
+            vtt_count = vtt_segment.count("\n") + 1
+            logger.info(f"  [{idx + 1}/{total_chunks}] Adding {vtt_count} VTT speaker hints")
+
+    # Fill template
+    full_prompt = prompt_template.format(
+        chunk_info=chunk_info,
+        vtt_segment=vtt_segment or "(no VTT data for this chunk)",
+    )
 
     # Transcribe
     logger.info(f"  [{idx + 1}/{total_chunks}] Transcribing via {model}...")
@@ -220,6 +324,11 @@ async def _transcribe_chunk(
 
     transcript = response.text
 
+    # Add absolute offset to timestamps
+    offset = int(start)
+    if offset > 0:
+        transcript = _add_offset_to_transcript(transcript, offset)
+
     # Tail for next chunk context
     lines = transcript.strip().split("\n")
     tail = "\n".join(lines[-10:]) if len(lines) > 10 else transcript
@@ -228,11 +337,23 @@ async def _transcribe_chunk(
 
 
 async def _transcribe_video_async(
-    video_path: str, model: str, chunk_minutes: int, usage: UsageStats | None = None,
+    video_path: str,
+    model: str,
+    chunk_minutes: int,
+    vtt_path: str | None = None,
+    usage: UsageStats | None = None,
 ) -> str:
     """Internal async transcription pipeline: split → transcribe chunks → concatenate."""
     client = genai.Client(api_key=config.GEMINI_API_KEY)
-    prompt = _load_prompt(config.TRANSCRIPTION_PROMPT_PATH)
+    prompt_template = _load_prompt(config.TRANSCRIPTION_PROMPT_PATH)
+
+    # Parse VTT if provided
+    vtt_entries = None
+    if vtt_path:
+        with open(vtt_path, "r", encoding="utf-8") as f:
+            vtt_text = f.read()
+        vtt_entries = parse_vtt(vtt_text)
+        logger.info(f"Loaded {len(vtt_entries)} VTT entries for speaker hints")
 
     chunks = _split_video(video_path, chunk_minutes)
 
@@ -244,8 +365,9 @@ async def _transcribe_video_async(
             transcript, prev_tail = await _transcribe_chunk(
                 client=client,
                 chunk=chunk,
-                prompt=prompt,
+                prompt_template=prompt_template,
                 model=model,
+                vtt_entries=vtt_entries,
                 prev_tail=prev_tail,
                 total_chunks=len(chunks),
                 usage=usage,
@@ -276,10 +398,12 @@ async def _transcribe_video_async(
 
 
 def transcribe_video(
-    video_path: str, duration_seconds: int = 0,
+    video_path: str,
+    duration_seconds: int = 0,
+    vtt_path: str | None = None,
 ) -> tuple[str | None, UsageStats]:
     """
-    Transcribe a video file using Gemini.
+    Transcribe a video file using Gemini, optionally with VTT speaker hints.
 
     Returns (transcript_text, usage_stats). Transcript is None if skipped/failed.
     """
@@ -297,11 +421,12 @@ def transcribe_video(
         return None, usage
 
     file_size_mb = Path(video_path).stat().st_size / (1024 * 1024)
-    logger.info(f"Transcribing {video_path} ({file_size_mb:.0f} MB) with {config.GEMINI_MODEL}")
+    vtt_info = f" + VTT hints" if vtt_path else ""
+    logger.info(f"Transcribing {video_path} ({file_size_mb:.0f} MB) with {config.GEMINI_MODEL}{vtt_info}")
 
     try:
         transcript = asyncio.run(
-            _transcribe_video_async(video_path, config.GEMINI_MODEL, CHUNK_MINUTES, usage)
+            _transcribe_video_async(video_path, config.GEMINI_MODEL, CHUNK_MINUTES, vtt_path, usage)
         )
         return transcript, usage
     except Exception as e:
@@ -319,8 +444,6 @@ def generate_title(transcript: str, usage: UsageStats | None = None) -> str | No
         client = genai.Client(api_key=config.GEMINI_API_KEY)
 
         # Use only the first ~4000 chars of transcript for title generation
-        # (a short title doesn't need the full transcript, and this avoids
-        # context window pressure that can cause output truncation)
         transcript_excerpt = transcript[:4000]
 
         def _generate():

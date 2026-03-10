@@ -4,7 +4,7 @@ Automated system that downloads Zoom cloud recordings and uploads them to YouTub
 
 ## Features
 
-- **Automated Downloads**: Fetches new Zoom cloud recordings hourly
+- **Automated Downloads**: Fetches new Zoom cloud recordings every 10 minutes
 - **Smart Video Selection**: Automatically selects the best video (gallery view preferred)
 - **YouTube Upload**: Uploads videos as unlisted to YouTube
 - **Discord Notifications**: Posts YouTube links to Discord channel via webhook
@@ -13,6 +13,7 @@ Automated system that downloads Zoom cloud recordings and uploads them to YouTub
 - **CSV Tracking**: Tracks all processed recordings in a CSV database
 - **Retry Logic**: Automatically retries failed operations on next run
 - **File Cleanup**: Automatically deletes old videos after retention period
+- **VTT Speaker Hints**: Uses Zoom's audio transcript (VTT) for accurate speaker attribution in Gemini transcription
 - **Token Management**: Automatically handles token expiration and prompts for re-authorization
 - **Dry Run Mode**: Test without making actual changes
 
@@ -184,7 +185,7 @@ python main.py --verbose
 
 ### Cron Setup
 
-Add to crontab to run hourly:
+Add to crontab to run every 10 minutes:
 
 ```bash
 crontab -e
@@ -193,8 +194,10 @@ crontab -e
 Add this line (adjust paths as needed):
 
 ```bash
-0 * * * * cd /path/to/vaduz_zoom_to_youtube && /path/to/venv/bin/python main.py >> /path/to/zoom_to_youtube.log 2>&1
+*/10 * * * * cd /path/to/vaduz_zoom_to_youtube && /path/to/venv/bin/python main.py >> /path/to/zoom_to_youtube.log 2>&1
 ```
+
+Frequent runs are needed because the Zoom VTT transcript appears with a delay after the video is ready. The script detects video readiness first, then waits for the VTT to appear before processing.
 
 ## Configuration
 
@@ -215,12 +218,16 @@ All configuration is done via environment variables in `.env`:
 1. **Fetch Recordings**: Gets last N meetings from Zoom (configurable)
 2. **Check CSV**: Skips already processed recordings
 3. **Select Best Video**: Chooses gallery view if available, falls back to speaker view
-4. **Download**: Downloads video to `downloaded_videos/{meeting_folder}/`
-5. **Upload**: Uploads to YouTube as unlisted video
-6. **Notify**: Posts YouTube link to Discord
-7. **Track**: Records all operations in CSV
-8. **Retry**: On next run, retries any failed operations
-9. **Cleanup**: Deletes videos older than retention period
+4. **Detect Video Ready**: Records `video_ready_at` timestamp in CSV
+5. **Wait for VTT**: Checks if Zoom's audio transcript (VTT) is ready; if not, waits until next run
+6. **Detect VTT Ready**: Records `vtt_ready_at` timestamp in CSV (logs delay from video readiness)
+7. **Download**: Downloads video + VTT to `downloaded_videos/{meeting_folder}/`
+8. **Upload**: Uploads to YouTube as unlisted video
+9. **Transcribe**: Transcribes via Gemini with VTT speaker hints for accurate attribution
+10. **Notify**: Posts YouTube link to Discord
+11. **Track**: Records all operations in CSV
+12. **Retry**: On next run, retries any failed operations
+13. **Cleanup**: Deletes videos older than retention period
 
 ## CSV Tracking
 
@@ -239,6 +246,8 @@ All processed recordings are tracked in `processed_recordings.csv`:
 - `failure_count`: Number of consecutive failures (resets on success)
 - `error_notified_at`: Timestamp when error notification was last sent
 - `last_notified_error`: Last error message that triggered a notification
+- `video_ready_at`: Timestamp when video first appeared in Zoom cloud
+- `vtt_ready_at`: Timestamp when VTT transcript first appeared in Zoom cloud
 
 ## Error Handling
 
@@ -347,7 +356,7 @@ The system tracks consecutive failures for each recording. When a recording fail
 - Higher values = less sensitive (only notify for persistent issues)
 
 **Note on Zoom processing delays:**
-Zoom cloud recordings can take 2-6 hours to become available via the API after a meeting ends, especially for longer recordings. During this time, the script will report "No suitable video file found" even though the recording exists in the Zoom web portal. With hourly cron runs, a threshold of 3 may trigger false alarms for slow-processing recordings. Consider setting `ERROR_NOTIFICATION_THRESHOLD=5` to allow ~5 hours of retries before alerting, which accommodates most Zoom processing delays while still catching genuine failures the same day.
+Zoom cloud recordings can take 2-6 hours to become available via the API after a meeting ends, especially for longer recordings. The VTT audio transcript appears with additional delay after the video is ready. The script tracks both readiness timestamps (`video_ready_at`, `vtt_ready_at`) and logs the delay. With 10-minute cron runs and `ERROR_NOTIFICATION_THRESHOLD=5`, you get ~50 minutes of retries before alerting, which accommodates most Zoom processing delays.
 
 ### Multiple Google Accounts / Wrong Account Selected
 - If you have multiple Google accounts logged in and want to use a specific one:
@@ -366,13 +375,24 @@ vaduz_zoom_to_youtube/
 ├── discord_client.py          # Discord webhook client
 ├── video_tracker.py           # CSV tracking database
 ├── video_manager.py           # File cleanup logic
-├── gallery_identifier.py     # Video selection logic
+├── transcription_client.py    # Gemini transcription with VTT speaker hints
+├── transcript_storage.py      # Git-based transcript storage (GitHub)
+├── gallery_identifier.py      # Video selection logic
+├── utils.py                   # Shared utilities (retry_with_backoff)
 ├── requirements.txt           # Python dependencies
+├── prompts/                   # Prompt templates (gitignored, .example files committed)
+│   ├── transcription_prompt.txt       # Gemini transcription prompt
+│   ├── transcription_prompt.txt.example # Anonymized example
+│   ├── title_prompt.txt               # Gemini title generation prompt
+│   └── discord_notification.txt       # Discord message template
 ├── .env.example               # Environment variables template
 ├── .env                       # Credentials (gitignored)
 ├── processed_recordings.csv   # Tracking database (gitignored)
 ├── zoom_to_youtube.log        # Log file (gitignored)
-└── downloaded_videos/        # Video storage (gitignored)
+└── downloaded_videos/         # Video storage (gitignored)
+    └── {date} {time} - {title}/
+        ├── {best_video}.mp4
+        └── zoom_transcript.vtt  # Zoom VTT for speaker hints
 ```
 
 ## Prototypes
@@ -381,6 +401,7 @@ This repository also contains prototype modules in `prototype/`:
 - `prototype/zoom_download/` - Original Zoom download prototype
 - `prototype/youtube_upload/` - Original YouTube upload prototype
   - Contains `OAUTH_REMOTE_HOST_DEBUGGING.md` - Detailed notes on debugging OAuth flows when running on remote hosts
+- `prototype/vtt_speaker_hints/` - VTT speaker hints prototype for prompt iteration
 
 See their respective README files for prototype-specific documentation.
 

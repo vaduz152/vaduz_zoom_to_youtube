@@ -81,7 +81,7 @@ def _notify_if_resolved(
 
 
 def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = False) -> None:
-    """Process a single recording: download, upload, transcribe, notify."""
+    """Process a single recording: wait for video+VTT, download, upload, transcribe, notify."""
     zoom_uuid = recording.get('uuid', '')
     meeting_topic = recording.get('topic') or 'Untitled Meeting'
     start_time = recording.get('start_time') or ''
@@ -110,6 +110,7 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
     available_types = [f.get('recording_type', 'unknown') for f in recording_files]
     logger.debug(f"Available recording types for {zoom_uuid[:8]}: {available_types}")
 
+    # --- Check video readiness ---
     best_video = zoom_client.find_best_video(recording_files)
     if not best_video:
         processing_files = [
@@ -136,11 +137,25 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
         )
         return
 
+    # Record video readiness timestamp
+    tracker.record_video_ready(zoom_uuid, meeting_topic, start_time)
+
+    # --- Check VTT readiness ---
+    transcript_file = zoom_client.find_transcript_file(recording_files)
+    if transcript_file:
+        tracker.record_vtt_ready(zoom_uuid)
+    else:
+        logger.info(f"VTT not yet available for {meeting_topic}, waiting for next run")
+        return
+
+    # --- From here: both video and VTT are ready ---
+
     folder_name = zoom_client.generate_folder_name(recording)
     video_type = best_video.get('recording_type', 'video')
     file_path = config.DOWNLOAD_DIR / folder_name / f"{video_type}.mp4"
+    vtt_path = config.DOWNLOAD_DIR / folder_name / "zoom_transcript.vtt"
 
-    # Step 1: Download
+    # Step 1: Download video + VTT
     if not existing_record or not existing_record.get('zoom_downloaded_at'):
         if dry_run:
             logger.info(f"[DRY RUN] Would download to: {file_path}")
@@ -150,9 +165,18 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
                 if not download_url:
                     raise ValueError("No download URL in video file")
                 access_token = zoom_client.get_access_token()
-                zoom_client.download_video(download_url, access_token, file_path)
+
+                # Download video
+                zoom_client.download_file(download_url, access_token, file_path)
+                logger.info(f"Downloaded video: {file_path}")
+
+                # Download VTT
+                vtt_download_url = transcript_file.get('download_url')
+                if vtt_download_url:
+                    zoom_client.download_file(vtt_download_url, access_token, vtt_path)
+                    logger.info(f"Downloaded VTT: {vtt_path}")
+
                 had_failures = tracker.record_download(zoom_uuid, meeting_topic, start_time, file_path)
-                logger.info(f"Downloaded: {file_path}")
                 _notify_if_resolved(had_failures, zoom_uuid, meeting_topic, "Download")
             except Exception as e:
                 logger.error(f"Download failed: {e}")
@@ -166,7 +190,12 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
                 download_url = best_video.get('download_url')
                 if download_url:
                     access_token = zoom_client.get_access_token()
-                    zoom_client.download_video(download_url, access_token, file_path)
+                    zoom_client.download_file(download_url, access_token, file_path)
+                    # Also re-download VTT if missing
+                    if not vtt_path.exists():
+                        vtt_download_url = transcript_file.get('download_url')
+                        if vtt_download_url:
+                            zoom_client.download_file(vtt_download_url, access_token, vtt_path)
                     had_failures = tracker.record_download(zoom_uuid, meeting_topic, start_time, file_path)
                     _notify_if_resolved(had_failures, zoom_uuid, meeting_topic, "Download (retry)")
             except Exception as e:
@@ -199,7 +228,7 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
     else:
         logger.info(f"Already uploaded: {existing_record.get('youtube_url')}")
 
-    # Step 3: Transcribe + generate title + save transcript
+    # Step 3: Transcribe with VTT hints + generate title + save transcript
     existing_record = tracker.get_record(zoom_uuid)  # Refresh
     transcript_url = existing_record.get('transcript_url', '') if existing_record else ''
     generated_title = existing_record.get('generated_title', '') if existing_record else ''
@@ -210,8 +239,11 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
             logger.info(f"[DRY RUN] Would transcribe: {file_path}")
         else:
             try:
+                # Pass VTT path for speaker hints
+                vtt_for_transcription = str(vtt_path) if vtt_path.exists() else None
                 transcript, usage = transcription_client.transcribe_video(
-                    str(file_path), duration_seconds
+                    str(file_path), duration_seconds,
+                    vtt_path=vtt_for_transcription,
                 )
                 if transcript:
                     generated_title = transcription_client.generate_title(transcript, usage) or ''

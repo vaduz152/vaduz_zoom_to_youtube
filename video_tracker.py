@@ -14,6 +14,8 @@ CSV_HEADERS = [
     "meeting_topic",
     "start_time",
     "file_path",
+    "video_ready_at",
+    "vtt_ready_at",
     "zoom_downloaded_at",
     "youtube_uploaded_at",
     "youtube_url",
@@ -58,7 +60,8 @@ class VideoTracker:
                     if field not in row:
                         row[field] = '0'
                 for field in ('error_notified_at', 'last_notified_error',
-                              'transcribed_at', 'transcript_url', 'generated_title'):
+                              'transcribed_at', 'transcript_url', 'generated_title',
+                              'video_ready_at', 'vtt_ready_at'):
                     if field not in row:
                         row[field] = ''
                 records.append(row)
@@ -187,6 +190,52 @@ class VideoTracker:
                 return updated
 
         return False
+
+    def record_video_ready(
+        self,
+        zoom_uuid: str,
+        meeting_topic: str = '',
+        start_time: str = '',
+    ) -> None:
+        """Record when video first appeared in Zoom cloud."""
+        records = self._read_all_records()
+        record = self._find_or_create(records, zoom_uuid)
+        if record.get('video_ready_at'):
+            return  # Already recorded
+        if meeting_topic:
+            record['meeting_topic'] = meeting_topic
+        if start_time:
+            record['start_time'] = start_time
+        record['video_ready_at'] = datetime.now().isoformat()
+        record['status'] = record.get('status') or 'waiting_for_vtt'
+        self._write_all_records(records)
+        logger.info(f"Video ready in Zoom cloud: {zoom_uuid[:8]}...")
+
+    def record_vtt_ready(self, zoom_uuid: str) -> None:
+        """Record when VTT transcript first appeared in Zoom cloud."""
+        records = self._read_all_records()
+        record = None
+        for r in records:
+            if r['zoom_uuid'] == zoom_uuid:
+                record = r
+                break
+        if not record or record.get('vtt_ready_at'):
+            return
+        record['vtt_ready_at'] = datetime.now().isoformat()
+        self._write_all_records(records)
+
+        # Log delay between video and VTT readiness
+        video_ready = record.get('video_ready_at', '')
+        if video_ready:
+            try:
+                dt_video = datetime.fromisoformat(video_ready)
+                dt_vtt = datetime.fromisoformat(record['vtt_ready_at'])
+                delay = dt_vtt - dt_video
+                logger.info(f"VTT ready for {zoom_uuid[:8]}... (delay from video: {delay})")
+            except (ValueError, TypeError):
+                logger.info(f"VTT ready for {zoom_uuid[:8]}...")
+        else:
+            logger.info(f"VTT ready for {zoom_uuid[:8]}...")
 
     def record_download(
         self,
