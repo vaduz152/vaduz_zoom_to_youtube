@@ -46,13 +46,13 @@ def derive_filename(folder_name: str, title: str | None = None) -> str:
     folder_name: "2026-03-03 12-00 - Вместе на полянке"
     title: "Баланс кошельков и аналитика" (from Gemini)
 
-    Returns: "2026-03-03 12-00 - Баланс кошельков и аналитика.txt"
+    Returns: "2026-03-03 12-00 - Баланс кошельков и аналитика.md"
     """
     if title:
         parts = folder_name.split(" - ", 1)
         date_time = parts[0]  # "2026-03-03 12-00"
-        return f"{date_time} - {title}.txt"
-    return f"{folder_name}.txt"
+        return f"{date_time} - {title}.md"
+    return f"{folder_name}.md"
 
 
 def _github_url(github_repo: str, filename: str) -> str:
