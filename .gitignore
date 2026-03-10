@@ -63,4 +63,4 @@ prompts/*.txt
 transcripts/
 
 # macOS System Files
-.DS_Store
+prototype/vtt_speaker_hints/sandbox/
