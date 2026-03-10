@@ -378,16 +378,7 @@ async def _transcribe_video_async(
         if len(all_transcripts) == 1:
             return all_transcripts[0]
 
-        parts = []
-        for i, transcript in enumerate(all_transcripts):
-            chunk = chunks[i]
-            parts.append(
-                f"\n{'=' * 60}\n"
-                f"## Chunk {i + 1}: {_fmt_time(chunk['start_seconds'])} — {_fmt_time(chunk['end_seconds'])}\n"
-                f"{'=' * 60}\n\n"
-                f"{transcript}"
-            )
-        return "\n".join(parts)
+        return "\n\n".join(all_transcripts)
 
     finally:
         # Cleanup chunk files
@@ -443,13 +434,10 @@ def generate_title(transcript: str, usage: UsageStats | None = None) -> str | No
         prompt = _load_prompt(config.TITLE_PROMPT_PATH)
         client = genai.Client(api_key=config.GEMINI_API_KEY)
 
-        # Use only the first ~4000 chars of transcript for title generation
-        transcript_excerpt = transcript[:4000]
-
         def _generate():
             return client.models.generate_content(
                 model=config.GEMINI_MODEL,
-                contents=[prompt + "\n\n" + transcript_excerpt],
+                contents=[prompt + "\n\n" + transcript],
                 config=types.GenerateContentConfig(
                     max_output_tokens=2048,
                     temperature=0.3,

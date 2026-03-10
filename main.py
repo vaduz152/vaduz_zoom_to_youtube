@@ -255,6 +255,12 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
                     else:
                         full_title = folder_name
 
+                    # Add markdown header with title and date
+                    header_title = generated_title or meeting_topic or folder_name
+                    header_date = _format_meeting_datetime(start_time)
+                    header = f"# {header_title}\n\n**{header_date}**\n\n"
+                    transcript = header + transcript
+
                     transcript_url = transcript_storage.save_transcript(
                         transcript, folder_name, generated_title or None
                     ) or ''
