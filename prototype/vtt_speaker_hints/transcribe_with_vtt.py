@@ -40,6 +40,7 @@ if not GEMINI_API_KEY:
 DEFAULT_MODEL = "gemini-3-pro-preview"
 CHUNK_MINUTES = 10
 OVERLAP_SECONDS = 15
+MAX_CHUNKS = 3  # Limit number of chunks to process (None = all)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPT_FILE = os.path.join(SCRIPT_DIR, "sandbox", "prompt.txt")
@@ -355,6 +356,9 @@ async def transcribe_video(
 
     client = genai.Client(api_key=GEMINI_API_KEY)
     chunks = split_video(video_path, chunk_minutes)
+    if MAX_CHUNKS:
+        chunks = chunks[:MAX_CHUNKS]
+        print(f"  Limited to first {MAX_CHUNKS} chunks")
 
     try:
         all_transcripts = []
