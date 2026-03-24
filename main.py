@@ -200,7 +200,7 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
                     _notify_if_resolved(had_failures, zoom_uuid, meeting_topic, "Download (retry)")
             except Exception as e:
                 logger.error(f"Retry download failed: {e}")
-                _handle_error(tracker, zoom_uuid, meeting_topic, start_time, f"Retry download failed: {e}")
+                _handle_error(tracker, zoom_uuid, meeting_topic, start_time, f"Download failed: {e}")
                 return
 
     # Step 2: Upload to YouTube
@@ -381,7 +381,7 @@ def retry_failed_recordings(tracker: VideoTracker, dry_run: bool = False) -> Non
                             _notify_if_resolved(had_failures, uuid, meeting_topic, "Upload (retry)")
                         except Exception as e:
                             logger.error(f"Retry upload failed: {e}")
-                            _handle_error(tracker, uuid, meeting_topic, start_time, f"Retry upload failed: {e}")
+                            _handle_error(tracker, uuid, meeting_topic, start_time, f"Upload failed: {e}")
 
         # Retry Discord notification if uploaded but not notified
         if record.get('youtube_uploaded_at') and not record.get('discord_notified_at'):
@@ -404,10 +404,10 @@ def retry_failed_recordings(tracker: VideoTracker, dry_run: bool = False) -> Non
                             logger.info(f"Retry notification successful")
                             _notify_if_resolved(had_failures, uuid, meeting_topic, "Discord notification (retry)")
                         else:
-                            _handle_error(tracker, uuid, meeting_topic, start_time, "Retry Discord notification failed")
+                            _handle_error(tracker, uuid, meeting_topic, start_time, "Discord notification failed")
                     except Exception as e:
                         logger.error(f"Retry notification failed: {e}")
-                        _handle_error(tracker, uuid, meeting_topic, start_time, f"Retry notification failed: {e}")
+                        _handle_error(tracker, uuid, meeting_topic, start_time, f"Discord notification failed: {e}")
 
 
 LOCK_FILE = Path(__file__).parent / ".main.lock"
