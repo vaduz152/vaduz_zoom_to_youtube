@@ -413,6 +413,90 @@ def retry_failed_recordings(tracker: VideoTracker, dry_run: bool = False) -> Non
 LOCK_FILE = Path(__file__).parent / ".main.lock"
 
 
+def _check_credentials(dry_run: bool) -> None:
+    """Validate external service credentials. Runs even in dry-run mode."""
+    logger.info("\nChecking credentials...")
+    errors = []
+
+    # Zoom
+    try:
+        zoom_client.get_access_token()
+        logger.info("  Zoom: OK")
+    except Exception as e:
+        logger.error(f"  Zoom: FAILED - {e}")
+        errors.append(f"Zoom: {e}")
+
+    # YouTube - validate credentials without starting interactive OAuth
+    try:
+        youtube_client.check_credentials()
+        logger.info("  YouTube: OK")
+    except Exception as e:
+        logger.error(f"  YouTube: FAILED - {e}")
+        errors.append(f"YouTube: {e}")
+
+    # Gemini - lightweight API check
+    if config.GEMINI_API_KEY:
+        try:
+            from google import genai
+            client = genai.Client(api_key=config.GEMINI_API_KEY)
+            client.models.get(model=config.GEMINI_MODEL)
+            logger.info("  Gemini: OK")
+        except Exception as e:
+            logger.error(f"  Gemini: FAILED - {e}")
+            errors.append(f"Gemini: {e}")
+    else:
+        logger.warning("  Gemini: skipped (no API key)")
+
+    # Discord webhook - test with a dry ping (HEAD request)
+    try:
+        import requests as req
+        resp = req.head(config.DISCORD_WEBHOOK_URL, timeout=5)
+        if resp.status_code < 400:
+            logger.info("  Discord: OK")
+        else:
+            logger.warning(f"  Discord: HTTP {resp.status_code}")
+            errors.append(f"Discord: HTTP {resp.status_code}")
+    except Exception as e:
+        logger.error(f"  Discord: FAILED - {e}")
+        errors.append(f"Discord: {e}")
+
+    # Transcripts repo (holds prompts, transcripts, summaries)
+    if config.TRANSCRIPTS_REPO_URL:
+        try:
+            transcript_storage._ensure_repo(config.TRANSCRIPTS_REPO_PATH, config.TRANSCRIPTS_REPO_URL)
+            logger.info("  Transcripts repo: OK")
+        except Exception as e:
+            logger.error(f"  Transcripts repo: FAILED - {e}")
+            errors.append(f"Transcripts repo: {e}")
+
+    # Prompt files (live in transcripts repo)
+    for label, path in [
+        ("Transcription prompt", config.TRANSCRIPTION_PROMPT_PATH),
+        ("Title prompt", config.TITLE_PROMPT_PATH),
+    ]:
+        if path.exists():
+            logger.info(f"  {label}: OK")
+        else:
+            logger.error(f"  {label}: MISSING - {path}")
+            errors.append(f"{label}: {path} not found")
+
+    if errors:
+        summary = "; ".join(errors)
+        if dry_run:
+            logger.error(f"Credential check failed: {summary}")
+            sys.exit(1)
+        else:
+            logger.warning(f"Credential issues detected: {summary}")
+            try:
+                discord_client.send_error_notification(
+                    error_message="Credential/config check failed on startup",
+                    error_details=summary,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send Discord startup error: {e}")
+            logger.warning("Continuing anyway — errors will be handled per-recording")
+
+
 def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -452,6 +536,8 @@ def main() -> None:
     logger.info(f"  Video retention: {config.VIDEO_RETENTION_DAYS} days")
     logger.info(f"  Download directory: {config.DOWNLOAD_DIR}")
     logger.info("="*60)
+
+    _check_credentials(args.dry_run)
 
     tracker = VideoTracker()
 

@@ -68,14 +68,46 @@ pip install -r requirements.txt
    - No verification required for personal use
    - See [Testing vs Published Mode](#youtube-oauth-app-testing-vs-published-mode) for details
 
-### 4. Configure Discord Webhook
+### 4. Create Meeting Data Repository
+
+Prompts, transcripts, and summaries are stored in a separate **private** GitHub repository. This keeps sensitive content out of the main repo and ensures nothing is lost when migrating servers.
+
+1. Create a new **private** repository on GitHub (e.g. `meeting-transcripts`)
+2. Initialize it with the required structure:
+
+```bash
+git clone git@github.com:YOUR_ORG/meeting-transcripts.git
+cd meeting-transcripts
+mkdir transcripts prompts summaries
+
+# Copy prompt templates and customize them for your project
+cp ../prompts/*.txt.example prompts/
+# Rename .example files and edit as needed:
+mv prompts/transcription_prompt.txt.example prompts/transcription_prompt.txt
+mv prompts/title_prompt.txt.example prompts/title_prompt.txt
+mv prompts/discord_notification.txt.example prompts/discord_notification.txt
+
+git add -A && git commit -m "Initial structure" && git push
+```
+
+3. Set the repo URL in `.env`:
+
+```bash
+TRANSCRIPTS_REPO_URL=git@github.com:YOUR_ORG/meeting-transcripts.git
+TRANSCRIPTS_REPO_PATH=./meeting-transcripts
+TRANSCRIPTS_GITHUB_REPO=YOUR_ORG/meeting-transcripts
+```
+
+The repo will be cloned automatically on first run. On a new server, just configure `.env` — prompts come along with the clone.
+
+### 5. Configure Discord Webhook
 
 1. Open your Discord server
 2. Go to Server Settings → Integrations → Webhooks
 3. Create a new webhook
 4. Copy the webhook URL
 
-### 5. Create `.env` File
+### 6. Create `.env` File
 
 Copy the example file and fill in your credentials:
 
@@ -117,7 +149,7 @@ LOG_FILE=./zoom_to_youtube.log
 
 **Note:** The `.env` file is gitignored and should never be committed. Use `.env.example` as a template.
 
-### 6. First-Time Authorization
+### 7. First-Time Authorization
 
 **Important: If running on a remote host via SSH**, you need to set up port forwarding **before** running the script. This allows OAuth redirects to work automatically.
 
@@ -364,6 +396,25 @@ Zoom cloud recordings can take 2-6 hours to become available via the API after a
   - Or use an incognito/private window when authorizing
   - Or temporarily sign out of other accounts before authorizing
 
+## Meeting Data Repository
+
+Prompts, transcripts, and summaries are stored in a separate **private** GitHub repository (configured via `TRANSCRIPTS_REPO_URL`). This keeps sensitive content out of the main (public) repo and ensures nothing is lost when migrating to a new server.
+
+The repo is cloned automatically on first run. Expected structure:
+
+```
+meeting-transcripts/           # Private GitHub repo (cloned automatically)
+├── transcripts/               # AI-generated meeting transcripts
+│   └── 2026-03-20 12-00 - Topic.md
+├── prompts/                   # Gemini & Discord templates
+│   ├── transcription_prompt.txt
+│   ├── title_prompt.txt
+│   └── discord_notification.txt
+└── summaries/                 # Meeting summaries (future)
+```
+
+On a fresh server, `git clone` + `git clone` of this repo is all that's needed — prompts come along automatically.
+
 ## Repository Structure
 
 ```
@@ -380,13 +431,9 @@ vaduz_zoom_to_youtube/
 ├── gallery_identifier.py      # Video selection logic
 ├── utils.py                   # Shared utilities (retry_with_backoff)
 ├── requirements.txt           # Python dependencies
-├── prompts/                   # Prompt templates (gitignored, .example files committed)
-│   ├── transcription_prompt.txt       # Gemini transcription prompt
-│   ├── transcription_prompt.txt.example # Anonymized example
-│   ├── title_prompt.txt               # Gemini title generation prompt
-│   └── discord_notification.txt       # Discord message template
 ├── .env.example               # Environment variables template
 ├── .env                       # Credentials (gitignored)
+├── meeting-transcripts/       # Private data repo clone (gitignored)
 ├── processed_recordings.csv   # Tracking database (gitignored)
 ├── zoom_to_youtube.log        # Log file (gitignored)
 └── downloaded_videos/         # Video storage (gitignored)

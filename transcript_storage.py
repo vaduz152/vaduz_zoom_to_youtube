@@ -55,9 +55,9 @@ def derive_filename(folder_name: str, title: str | None = None) -> str:
     return f"{folder_name}.md"
 
 
-def _github_url(github_repo: str, filename: str) -> str:
+def _github_url(github_repo: str, filepath: str) -> str:
     """Construct GitHub blob URL for a file."""
-    return f"https://github.com/{github_repo}/blob/main/{quote(filename)}"
+    return f"https://github.com/{github_repo}/blob/main/{quote(filepath)}"
 
 
 def save_transcript(
@@ -83,17 +83,20 @@ def save_transcript(
         _sync_repo(repo_path)
 
         filename = derive_filename(folder_name, title)
-        dest = repo_path / filename
+        transcripts_dir = repo_path / "transcripts"
+        transcripts_dir.mkdir(exist_ok=True)
+        dest = transcripts_dir / filename
         dest.write_text(transcript, encoding="utf-8")
         logger.info(f"Wrote transcript: {dest}")
 
-        _run(["git", "add", filename], cwd=str(repo_path))
+        rel_path = f"transcripts/{filename}"
+        _run(["git", "add", rel_path], cwd=str(repo_path))
 
         # Check if there's anything to commit
         status = _run(["git", "status", "--porcelain"], cwd=str(repo_path))
         if not status.stdout.strip():
             logger.info("Transcript already exists with same content, no commit needed")
-            return _github_url(github_repo, filename)
+            return _github_url(github_repo, rel_path)
 
         _run(
             ["git", "commit", "-m", f"Add transcript: {filename}"],
@@ -101,7 +104,7 @@ def save_transcript(
         )
         _run(["git", "push"], cwd=str(repo_path))
 
-        url = _github_url(github_repo, filename)
+        url = _github_url(github_repo, rel_path)
         logger.info(f"Transcript pushed: {url}")
         return url
 

@@ -59,12 +59,8 @@ downloaded_videos/
 # Processed recordings tracker
 processed_recordings.csv
 
-# Prompts (contain project-specific context, .example files are committed)
-prompts/*.txt
-!prompts/*.txt.example
-
-# Local transcripts repo clone
-transcripts/
+# Meeting data repo clone (transcripts, prompts, summaries)
+meeting-transcripts/
 
 # macOS System Files
 prototype/vtt_speaker_hints/sandbox/

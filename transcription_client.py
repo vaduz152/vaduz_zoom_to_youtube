@@ -415,6 +415,10 @@ def transcribe_video(
     vtt_info = f" + VTT hints" if vtt_path else ""
     logger.info(f"Transcribing {video_path} ({file_size_mb:.0f} MB) with {config.GEMINI_MODEL}{vtt_info}")
 
+    # Validate prompt files exist before starting expensive transcription
+    if not config.TRANSCRIPTION_PROMPT_PATH.exists():
+        raise FileNotFoundError(f"Transcription prompt not found: {config.TRANSCRIPTION_PROMPT_PATH}")
+
     try:
         transcript = asyncio.run(
             _transcribe_video_async(video_path, config.GEMINI_MODEL, CHUNK_MINUTES, vtt_path, usage)
@@ -429,6 +433,9 @@ def generate_title(transcript: str, usage: UsageStats | None = None) -> str | No
     """Generate a short title from transcript using Gemini."""
     if not config.GEMINI_API_KEY:
         return None
+
+    if not config.TITLE_PROMPT_PATH.exists():
+        raise FileNotFoundError(f"Title prompt not found: {config.TITLE_PROMPT_PATH}")
 
     try:
         prompt = _load_prompt(config.TITLE_PROMPT_PATH)

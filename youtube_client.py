@@ -96,32 +96,45 @@ def start_google_oauth_server(port: int = 8081, timeout: int = 300) -> Tuple[Opt
     httpd = HTTPServer(server_address, GoogleOAuthRedirectHandler)
     httpd.authorization_code = None
     httpd.authorization_state = None
-    httpd.socket.settimeout(1.0)  # Set socket timeout for non-blocking behavior
-    
+    httpd.timeout = 1.0  # poll interval for the accept() loop
+
     logger.info(f"Starting Google OAuth redirect server on port {port}...")
     logger.info("Waiting for authorization (timeout: {} seconds)...".format(timeout))
-    
-    # Set a timeout for the server
+
     start_time = time.time()
     while httpd.authorization_code is None and (time.time() - start_time) < timeout:
-        try:
-            httpd.handle_request()
-            if httpd.authorization_code is not None:
-                break
-        except socket.timeout:
-            # Timeout is expected, continue waiting
-            continue
-    
+        httpd.handle_request()
+
     code = httpd.authorization_code
     state = httpd.authorization_state
     httpd.server_close()
-    
+
     if code:
         logger.info("Authorization code captured successfully!")
     else:
         logger.warning("Server timed out waiting for authorization code.")
-    
+
     return (code, state)
+
+
+def check_credentials() -> None:
+    """Validate that YouTube credentials exist and can be refreshed.
+
+    Raises an exception if credentials are missing or invalid,
+    without starting the interactive OAuth flow.
+    """
+    token_file = config.YOUTUBE_TOKEN_FILE
+    if not token_file.exists():
+        raise RuntimeError("YouTube token file not found — run main.py interactively to authorize")
+
+    creds = Credentials.from_authorized_user_file(str(token_file.resolve()), scopes=SCOPES)
+    if creds.valid:
+        return
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        token_file.write_text(creds.to_json())
+        return
+    raise RuntimeError("YouTube credentials invalid and cannot be refreshed — re-authorize interactively")
 
 
 def get_credentials() -> Credentials:
