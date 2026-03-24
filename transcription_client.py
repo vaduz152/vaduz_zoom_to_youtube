@@ -419,14 +419,10 @@ def transcribe_video(
     if not config.TRANSCRIPTION_PROMPT_PATH.exists():
         raise FileNotFoundError(f"Transcription prompt not found: {config.TRANSCRIPTION_PROMPT_PATH}")
 
-    try:
-        transcript = asyncio.run(
-            _transcribe_video_async(video_path, config.GEMINI_MODEL, CHUNK_MINUTES, vtt_path, usage)
-        )
-        return transcript, usage
-    except Exception as e:
-        logger.error(f"Transcription failed: {e}")
-        return None, usage
+    transcript = asyncio.run(
+        _transcribe_video_async(video_path, config.GEMINI_MODEL, CHUNK_MINUTES, vtt_path, usage)
+    )
+    return transcript, usage
 
 
 def generate_title(transcript: str, usage: UsageStats | None = None) -> str | None:
