@@ -383,31 +383,9 @@ def retry_failed_recordings(tracker: VideoTracker, dry_run: bool = False) -> Non
                             logger.error(f"Retry upload failed: {e}")
                             _handle_error(tracker, uuid, meeting_topic, start_time, f"Upload failed: {e}")
 
-        # Retry Discord notification if uploaded but not notified
-        if record.get('youtube_uploaded_at') and not record.get('discord_notified_at'):
-            youtube_url = record.get('youtube_url', '')
-            if youtube_url:
-                logger.info(f"Retrying Discord notification for: {uuid[:8]}...")
-                if dry_run:
-                    logger.info(f"[DRY RUN] Would retry Discord notification: {youtube_url}")
-                else:
-                    try:
-                        success = discord_client.send_notification(
-                            youtube_url,
-                            transcript_url=record.get('transcript_url') or None,
-                            generated_title=record.get('generated_title') or None,
-                            meeting_topic=meeting_topic,
-                            meeting_datetime=_format_meeting_datetime(start_time),
-                        )
-                        if success:
-                            had_failures = tracker.record_notification(uuid)
-                            logger.info(f"Retry notification successful")
-                            _notify_if_resolved(had_failures, uuid, meeting_topic, "Discord notification (retry)")
-                        else:
-                            _handle_error(tracker, uuid, meeting_topic, start_time, "Discord notification failed")
-                    except Exception as e:
-                        logger.error(f"Retry notification failed: {e}")
-                        _handle_error(tracker, uuid, meeting_topic, start_time, f"Discord notification failed: {e}")
+        # Note: Discord notification and transcription are NOT retried here.
+        # After a successful retry upload, process_recording will handle
+        # the remaining steps (transcription → Discord) on the next cron run.
 
 
 LOCK_FILE = Path(__file__).parent / ".main.lock"

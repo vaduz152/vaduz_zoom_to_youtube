@@ -145,6 +145,7 @@ class VideoTracker:
                 return bool(
                     record.get('zoom_downloaded_at') and
                     record.get('youtube_uploaded_at') and
+                    record.get('transcribed_at') and
                     record.get('discord_notified_at')
                 )
         return False
