@@ -39,7 +39,7 @@ OVERLAP_SECONDS = 15
 
 PROMPT_FILE = os.getenv(
     "TRANSCRIPTION_PROMPT_PATH",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../prompts/transcription_prompt.txt"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../prompts_examples/transcription_prompt.txt.example"),
 )
 with open(PROMPT_FILE, "r", encoding="utf-8") as f:
     TRANSCRIPTION_PROMPT = f.read()

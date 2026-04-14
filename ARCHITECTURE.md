@@ -30,11 +30,10 @@ vaduz_zoom_to_youtube/
 ├── utils.py                      # Shared utilities (retry_with_backoff)
 ├── requirements.txt              # Dependencies
 ├── README.md                     # Documentation
-├── prompts/                      # Prompt templates (gitignored, .example files committed)
-│   ├── transcription_prompt.txt  # Gemini transcription prompt (with VTT placeholders)
-│   ├── transcription_prompt.txt.example  # Anonymized example
-│   ├── title_prompt.txt          # Gemini title generation prompt
-│   └── discord_notification.txt  # Discord message template
+├── prompts_examples/              # Anonymized prompt examples (committed to repo)
+│   ├── transcription_prompt.txt.example  # Gemini transcription prompt example
+│   ├── title_prompt.txt.example          # Gemini title generation prompt example
+│   └── discord_notification.txt.example  # Discord message template example
 ├── processed_recordings.csv      # Tracking database (gitignored)
 ├── zoom_to_youtube.log           # Log file (gitignored)
 ├── transcripts/                  # Local clone of transcripts repo (gitignored)
@@ -150,7 +149,7 @@ Discord webhook operations with customizable template:
 - `send_error_notification(error_message, error_details)` - Post error notification
 - Returns success/failure status
 
-**Message template:** Loaded from `prompts/discord_notification.txt`, uses `str.format()` with variables `{title}`, `{youtube_url}`, `{transcript_url}`. Lines starting with `#` are stripped (comments).
+**Message template:** Loaded from `meeting-transcripts/prompts/discord_notification.txt`, uses `str.format()` with variables `{title}`, `{youtube_url}`, `{transcript_url}`. Lines starting with `#` are stripped (comments).
 
 ### 5a. `transcription_client.py`
 Gemini API client for video transcription with VTT speaker hints:
@@ -321,8 +320,8 @@ LOG_FILE=./zoom_to_youtube.log
 # Gemini API (transcription & title generation)
 GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-3-pro-preview
-TRANSCRIPTION_PROMPT_PATH=./prompts/transcription_prompt.txt
-TITLE_PROMPT_PATH=./prompts/title_prompt.txt
+TRANSCRIPTION_PROMPT_PATH=./meeting-transcripts/prompts/transcription_prompt.txt
+TITLE_PROMPT_PATH=./meeting-transcripts/prompts/title_prompt.txt
 MAX_TRANSCRIPTION_DURATION=7200
 
 # Transcript storage (GitHub repo)
@@ -331,7 +330,7 @@ TRANSCRIPTS_REPO_PATH=./transcripts
 TRANSCRIPTS_GITHUB_REPO=user/meeting-transcripts
 
 # Discord notification template
-DISCORD_NOTIFICATION_TEMPLATE_PATH=./prompts/discord_notification.txt
+DISCORD_NOTIFICATION_TEMPLATE_PATH=./meeting-transcripts/prompts/discord_notification.txt
 ```
 
 ## Dependencies

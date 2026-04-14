@@ -5,7 +5,7 @@
 `transcribe.py` — рабочий standalone-скрипт. Проверено на реальном видео (45 MB, 6 min).
 - Модель: настраивается через `GEMINI_MODEL` (по умолчанию `gemini-2.5-flash`, free tier: 5 RPM, 250K TPM, 20 RPD)
 - Пакет: `google-genai`
-- Промпты: `prompts/transcription_prompt.txt`, `prompts/title_prompt.txt` (gitignored, `.example` файлы коммитятся)
+- Промпты: `meeting-transcripts/prompts/transcription_prompt.txt`, `meeting-transcripts/prompts/title_prompt.txt` (примеры в `prompts_examples/`)
 - Ретраи: 3 попытки с задержками 15s, 45s, 90s
 
 ## Новый пайплайн
@@ -130,8 +130,8 @@ def record_transcription(self, zoom_uuid: str, transcript_url: str, generated_ti
 ```python
 GEMINI_API_KEY = get_env("GEMINI_API_KEY")
 GEMINI_MODEL = get_env("GEMINI_MODEL", "gemini-2.5-flash")
-TRANSCRIPTION_PROMPT_PATH = Path(get_env("TRANSCRIPTION_PROMPT_PATH", "./prompts/transcription_prompt.txt")).resolve()
-TITLE_PROMPT_PATH = Path(get_env("TITLE_PROMPT_PATH", "./prompts/title_prompt.txt")).resolve()
+TRANSCRIPTION_PROMPT_PATH = Path(get_env("TRANSCRIPTION_PROMPT_PATH", "./meeting-transcripts/prompts/transcription_prompt.txt")).resolve()
+TITLE_PROMPT_PATH = Path(get_env("TITLE_PROMPT_PATH", "./meeting-transcripts/prompts/title_prompt.txt")).resolve()
 TRANSCRIPTS_REPO_PATH = Path(get_env("TRANSCRIPTS_REPO_PATH", "./transcripts")).resolve()
 TRANSCRIPTS_GITHUB_REPO = get_env("TRANSCRIPTS_GITHUB_REPO", "")
 MAX_TRANSCRIPTION_DURATION = int(get_env("MAX_TRANSCRIPTION_DURATION", "7200"))  # 2 hours
@@ -148,8 +148,8 @@ google-genai
 ```
 GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-2.5-flash
-TRANSCRIPTION_PROMPT_PATH=./prompts/transcription_prompt.txt
-TITLE_PROMPT_PATH=./prompts/title_prompt.txt
+TRANSCRIPTION_PROMPT_PATH=./meeting-transcripts/prompts/transcription_prompt.txt
+TITLE_PROMPT_PATH=./meeting-transcripts/prompts/title_prompt.txt
 TRANSCRIPTS_REPO_PATH=./transcripts
 TRANSCRIPTS_GITHUB_REPO=user/zoom-transcripts
 MAX_TRANSCRIPTION_DURATION=7200

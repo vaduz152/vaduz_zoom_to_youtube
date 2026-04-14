@@ -81,7 +81,7 @@ cd meeting-transcripts
 mkdir transcripts prompts summaries
 
 # Copy prompt templates and customize them for your project
-cp ../prompts/*.txt.example prompts/
+cp ../prompts_examples/*.txt.example prompts/
 # Rename .example files and edit as needed:
 mv prompts/transcription_prompt.txt.example prompts/transcription_prompt.txt
 mv prompts/title_prompt.txt.example prompts/title_prompt.txt

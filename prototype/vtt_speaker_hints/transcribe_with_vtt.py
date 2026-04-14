@@ -45,7 +45,7 @@ MAX_CHUNKS = 3  # Limit number of chunks to process (None = all)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPT_FILE = os.path.join(SCRIPT_DIR, "sandbox", "prompt.txt")
 if not os.path.exists(PROMPT_FILE):
-    PROMPT_FILE = os.path.join(SCRIPT_DIR, "../../prompts/transcription_prompt.txt")
+    PROMPT_FILE = os.path.join(SCRIPT_DIR, "../../prompts_examples/transcription_prompt.txt.example")
 with open(PROMPT_FILE, "r", encoding="utf-8") as f:
     PROMPT_TEMPLATE = f.read()
 print(f"Using prompt: {PROMPT_FILE}")

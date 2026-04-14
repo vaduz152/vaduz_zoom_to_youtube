@@ -1,9 +1,13 @@
 """Main orchestrator for Zoom to YouTube automation."""
 import argparse
 import fcntl
+import hashlib
+import json
 import logging
+import shutil
+import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import config
@@ -333,6 +337,290 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
         logger.info(f"Already notified Discord: {youtube_url}")
 
 
+def _video_file_hash(video_path: Path) -> str:
+    """Compute SHA256 hash of the first 64KB + last 64KB + file size for a stable unique ID."""
+    h = hashlib.sha256()
+    size = video_path.stat().st_size
+    h.update(str(size).encode())
+    chunk_size = 64 * 1024
+    with open(video_path, 'rb') as f:
+        h.update(f.read(chunk_size))
+        if size > chunk_size:
+            f.seek(-chunk_size, 2)
+            h.update(f.read(chunk_size))
+    return h.hexdigest()[:16]
+
+
+def _probe_video_metadata(video_path: Path) -> dict:
+    """Extract creation_time and duration from video via ffprobe."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "quiet",
+         "-show_entries", "format=duration:format_tags=creation_time",
+         "-of", "json", str(video_path)],
+        capture_output=True, text=True,
+    )
+    data = json.loads(result.stdout)
+    fmt = data.get("format", {})
+    tags = fmt.get("tags", {})
+    return {
+        "creation_time": tags.get("creation_time", ""),
+        "duration_seconds": int(float(fmt.get("duration", "0"))),
+    }
+
+
+def _discover_local_folder(folder: Path) -> dict:
+    """Validate and discover video/vtt files in a local folder.
+
+    Returns dict with 'video_path', 'vtt_path' (or None), 'error' (or None).
+    """
+    mp4_files = list(folder.glob("*.mp4"))
+    vtt_files = list(folder.glob("*.vtt"))
+
+    if len(mp4_files) == 0:
+        return {"error": f"No .mp4 files found in {folder.name}"}
+    if len(mp4_files) > 1:
+        names = [f.name for f in mp4_files]
+        return {"error": f"Multiple .mp4 files in {folder.name}: {names}"}
+    if len(vtt_files) > 1:
+        names = [f.name for f in vtt_files]
+        return {"error": f"Multiple .vtt files in {folder.name}: {names}"}
+
+    return {
+        "video_path": mp4_files[0],
+        "vtt_path": vtt_files[0] if vtt_files else None,
+        "error": None,
+    }
+
+
+def process_local_recording(
+    folder: Path, tracker: VideoTracker, dry_run: bool = False
+) -> None:
+    """Process a single local video folder: copy to download dir, upload, transcribe, notify."""
+    meeting_topic = folder.name
+    logger.info(f"Processing local recording: {meeting_topic}")
+
+    # Discover files
+    discovery = _discover_local_folder(folder)
+    if discovery["error"]:
+        logger.error(f"Skipping {meeting_topic}: {discovery['error']}")
+        return
+
+    video_path = discovery["video_path"]
+    vtt_path = discovery["vtt_path"]
+
+    # Generate stable UUID from video content
+    file_hash = _video_file_hash(video_path)
+    local_uuid = f"local-{file_hash}"
+
+    # Check if already fully processed
+    if tracker.is_processed(local_uuid):
+        logger.info(f"Already fully processed, skipping: {local_uuid}")
+        return
+
+    existing_record = tracker.get_record(local_uuid)
+
+    # Extract metadata from video file
+    meta = _probe_video_metadata(video_path)
+    start_time = meta["creation_time"]
+    duration_seconds = meta["duration_seconds"]
+
+    if not start_time:
+        logger.warning(f"No creation_time in video metadata, using current time")
+        start_time = datetime.now(timezone.utc).isoformat()
+
+    # Check minimum length
+    if config.MIN_VIDEO_LENGTH_SECONDS > 0 and duration_seconds < config.MIN_VIDEO_LENGTH_SECONDS:
+        logger.info(f"Video too short ({duration_seconds}s < {config.MIN_VIDEO_LENGTH_SECONDS}s), skipping")
+        tracker.record_skipped(
+            local_uuid, f"Video too short: {duration_seconds}s",
+            meeting_topic=meeting_topic, start_time=start_time
+        )
+        return
+
+    # Copy files to DOWNLOAD_DIR
+    folder_name = zoom_client.sanitize_filename(
+        f"{_format_meeting_datetime(start_time).replace(':', '-')} - {meeting_topic}"
+    )
+    dest_dir = config.DOWNLOAD_DIR / folder_name
+    dest_video = dest_dir / video_path.name
+    dest_vtt = dest_dir / "zoom_transcript.vtt" if vtt_path else None
+
+    if not existing_record or not existing_record.get('zoom_downloaded_at'):
+        if dry_run:
+            logger.info(f"[DRY RUN] Would copy {video_path} to {dest_video}")
+        else:
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                if not dest_video.exists():
+                    shutil.copy2(video_path, dest_video)
+                    logger.info(f"Copied video: {dest_video}")
+                if vtt_path and dest_vtt and not dest_vtt.exists():
+                    shutil.copy2(vtt_path, dest_vtt)
+                    logger.info(f"Copied VTT: {dest_vtt}")
+                tracker.record_download(local_uuid, meeting_topic, start_time, dest_video)
+            except Exception as e:
+                logger.error(f"Copy failed: {e}")
+                _handle_error(tracker, local_uuid, meeting_topic, start_time, f"Copy failed: {e}")
+                return
+    else:
+        logger.info(f"Already copied: {dest_video}")
+        # Use file_path from tracker if folder was renamed after transcription
+        tracked_path = Path(existing_record.get('file_path', ''))
+        if tracked_path.exists():
+            dest_video = tracked_path
+            dest_dir = tracked_path.parent
+            dest_vtt = dest_dir / "zoom_transcript.vtt"
+            folder_name = dest_dir.name
+
+    # Step 2: Upload to YouTube
+    if not existing_record or not existing_record.get('youtube_uploaded_at'):
+        if dry_run:
+            logger.info(f"[DRY RUN] Would upload to YouTube: {dest_video}")
+        else:
+            try:
+                if not dest_video.exists():
+                    raise FileNotFoundError(f"Video file not found: {dest_video}")
+                youtube_url = youtube_client.upload_video(
+                    video_path=dest_video,
+                    title=folder_name,
+                    description=config.YOUTUBE_DEFAULT_DESCRIPTION,
+                    tags=[t.strip() for t in config.YOUTUBE_DEFAULT_TAGS.split(",") if t.strip()],
+                    category_id=config.YOUTUBE_CATEGORY_ID
+                )
+                had_failures = tracker.record_upload(local_uuid, youtube_url)
+                logger.info(f"Uploaded to YouTube: {youtube_url}")
+                _notify_if_resolved(had_failures, local_uuid, meeting_topic, "Upload")
+            except Exception as e:
+                logger.error(f"Upload failed: {e}")
+                _handle_error(tracker, local_uuid, meeting_topic, start_time, f"Upload failed: {e}")
+                return
+    else:
+        logger.info(f"Already uploaded: {existing_record.get('youtube_url')}")
+
+    # Step 3: Transcribe + generate title + save transcript
+    existing_record = tracker.get_record(local_uuid)
+    transcript_url = existing_record.get('transcript_url', '') if existing_record else ''
+    generated_title = existing_record.get('generated_title', '') if existing_record else ''
+    transcription_cost = ''
+
+    if not existing_record or not existing_record.get('transcribed_at'):
+        if dry_run:
+            logger.info(f"[DRY RUN] Would transcribe: {dest_video}")
+        else:
+            try:
+                vtt_for_transcription = str(dest_vtt) if dest_vtt and dest_vtt.exists() else None
+                if vtt_for_transcription:
+                    logger.info(f"Using VTT hints: {dest_vtt.name}")
+                else:
+                    logger.info("No VTT available, transcribing without speaker hints")
+                transcript, usage = transcription_client.transcribe_video(
+                    str(dest_video), duration_seconds,
+                    vtt_path=vtt_for_transcription,
+                )
+                if transcript:
+                    generated_title = transcription_client.generate_title(transcript, usage) or ''
+
+                    if generated_title:
+                        dt_prefix = _format_meeting_datetime(start_time).replace(':', '-')
+                        full_title = f"{dt_prefix} - {generated_title}" if dt_prefix else generated_title
+                    else:
+                        full_title = folder_name
+
+                    header_title = generated_title or meeting_topic or folder_name
+                    header_date = _format_meeting_datetime(start_time)
+                    header = f"# {header_title}\n\n**{header_date}**\n\n"
+                    transcript = header + transcript
+
+                    transcript_url = transcript_storage.save_transcript(
+                        transcript, folder_name, generated_title or None
+                    ) or ''
+
+                    youtube_url = existing_record.get('youtube_url', '') if existing_record else ''
+                    if generated_title and youtube_url:
+                        description = f"{config.YOUTUBE_DEFAULT_DESCRIPTION}\n\nFolder: {folder_name}"
+                        youtube_client.update_video_title(youtube_url, full_title, description)
+
+                    if generated_title and full_title != folder_name:
+                        new_folder_path = config.DOWNLOAD_DIR / full_title
+                        try:
+                            dest_video.parent.rename(new_folder_path)
+                            dest_video = new_folder_path / dest_video.name
+                            folder_name = full_title
+                            logger.info(f"Renamed folder to: {full_title}")
+                        except OSError as e:
+                            logger.warning(f"Could not rename folder: {e}")
+
+                    had_failures = tracker.record_transcription(
+                        local_uuid, transcript_url, generated_title
+                    )
+                    transcription_cost = usage.cost_string()
+                    logger.info(f"Transcription complete: {folder_name} ({transcription_cost})")
+                    _notify_if_resolved(had_failures, local_uuid, meeting_topic, "Transcription")
+                else:
+                    logger.info("Transcription skipped or returned no result")
+            except Exception as e:
+                logger.warning(f"Transcription step failed: {e}")
+                _handle_error(tracker, local_uuid, meeting_topic, start_time, f"Transcription failed: {e}")
+    else:
+        logger.info(f"Already transcribed: {transcript_url}")
+
+    # Step 4: Send Discord notification
+    existing_record = tracker.get_record(local_uuid)
+    youtube_url = existing_record.get('youtube_url', '') if existing_record else ''
+    transcript_url = existing_record.get('transcript_url', '') if existing_record else ''
+    generated_title = existing_record.get('generated_title', '') if existing_record else ''
+
+    if not existing_record or not existing_record.get('discord_notified_at'):
+        if not youtube_url:
+            logger.warning("Cannot send Discord notification: no YouTube URL")
+            return
+        if dry_run:
+            logger.info(f"[DRY RUN] Would send Discord notification: {youtube_url}")
+        else:
+            try:
+                success = discord_client.send_notification(
+                    youtube_url,
+                    transcript_url=transcript_url or None,
+                    generated_title=generated_title or None,
+                    meeting_topic=meeting_topic,
+                    meeting_datetime=_format_meeting_datetime(start_time),
+                    transcription_cost=transcription_cost or None,
+                )
+                if success:
+                    had_failures = tracker.record_notification(local_uuid)
+                    logger.info(f"Discord notification sent: {youtube_url}")
+                    _notify_if_resolved(had_failures, local_uuid, meeting_topic, "Discord notification")
+                else:
+                    _handle_error(tracker, local_uuid, meeting_topic, start_time, "Discord notification failed")
+            except Exception as e:
+                logger.error(f"Discord notification failed: {e}")
+                _handle_error(tracker, local_uuid, meeting_topic, start_time, f"Discord notification failed: {e}")
+    else:
+        logger.info(f"Already notified Discord: {youtube_url}")
+
+
+def process_local_videos(tracker: VideoTracker, dry_run: bool = False) -> None:
+    """Scan LOCAL_VIDEOS_DIR for subfolders and process each."""
+    local_dir = config.LOCAL_VIDEOS_DIR
+    if not local_dir.exists():
+        logger.info(f"Local videos directory not found: {local_dir}")
+        return
+
+    folders = sorted([f for f in local_dir.iterdir() if f.is_dir()])
+    if not folders:
+        logger.info(f"No subfolders in {local_dir}")
+        return
+
+    logger.info(f"Found {len(folders)} local video folder(s) to process")
+
+    for idx, folder in enumerate(folders, 1):
+        logger.info(f"\n[{idx}/{len(folders)}] Processing local folder: {folder.name}")
+        try:
+            process_local_recording(folder, tracker, dry_run=dry_run)
+        except Exception as e:
+            logger.error(f"Error processing local folder {folder.name}: {e}", exc_info=True)
+
+
 def retry_failed_recordings(tracker: VideoTracker, dry_run: bool = False) -> None:
     """Retry failed or incomplete recordings."""
     retry_records = tracker.get_records_for_retry()
@@ -475,6 +763,74 @@ def _check_credentials(dry_run: bool) -> None:
             logger.warning("Continuing anyway — errors will be handled per-recording")
 
 
+def _check_credentials_local(dry_run: bool) -> None:
+    """Validate credentials needed for local mode (no Zoom)."""
+    logger.info("\nChecking credentials (local mode)...")
+    errors = []
+
+    # YouTube
+    try:
+        youtube_client.check_credentials()
+        logger.info("  YouTube: OK")
+    except Exception as e:
+        logger.error(f"  YouTube: FAILED - {e}")
+        errors.append(f"YouTube: {e}")
+
+    # Gemini
+    if config.GEMINI_API_KEY:
+        try:
+            from google import genai
+            client = genai.Client(api_key=config.GEMINI_API_KEY)
+            client.models.get(model=config.GEMINI_MODEL)
+            logger.info("  Gemini: OK")
+        except Exception as e:
+            logger.error(f"  Gemini: FAILED - {e}")
+            errors.append(f"Gemini: {e}")
+    else:
+        logger.warning("  Gemini: skipped (no API key)")
+
+    # Discord
+    try:
+        import requests as req
+        resp = req.head(config.DISCORD_WEBHOOK_URL, timeout=5)
+        if resp.status_code < 400:
+            logger.info("  Discord: OK")
+        else:
+            logger.warning(f"  Discord: HTTP {resp.status_code}")
+            errors.append(f"Discord: HTTP {resp.status_code}")
+    except Exception as e:
+        logger.error(f"  Discord: FAILED - {e}")
+        errors.append(f"Discord: {e}")
+
+    # Transcripts repo
+    if config.TRANSCRIPTS_REPO_URL:
+        try:
+            transcript_storage._ensure_repo(config.TRANSCRIPTS_REPO_PATH, config.TRANSCRIPTS_REPO_URL)
+            logger.info("  Transcripts repo: OK")
+        except Exception as e:
+            logger.error(f"  Transcripts repo: FAILED - {e}")
+            errors.append(f"Transcripts repo: {e}")
+
+    # Prompt files
+    for label, path in [
+        ("Transcription prompt", config.TRANSCRIPTION_PROMPT_PATH),
+        ("Title prompt", config.TITLE_PROMPT_PATH),
+    ]:
+        if path.exists():
+            logger.info(f"  {label}: OK")
+        else:
+            logger.error(f"  {label}: MISSING - {path}")
+            errors.append(f"{label}: {path} not found")
+
+    if errors:
+        summary = "; ".join(errors)
+        if dry_run:
+            logger.error(f"Credential check failed: {summary}")
+            sys.exit(1)
+        else:
+            logger.warning(f"Credential issues detected: {summary}")
+
+
 def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -489,6 +845,11 @@ def main() -> None:
         "--verbose",
         action="store_true",
         help="Increase logging verbosity"
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Process local videos from LOCAL_VIDEOS_DIR instead of Zoom cloud"
     )
     args = parser.parse_args()
 
@@ -515,59 +876,69 @@ def main() -> None:
     logger.info(f"  Download directory: {config.DOWNLOAD_DIR}")
     logger.info("="*60)
 
-    _check_credentials(args.dry_run)
-
     tracker = VideoTracker()
 
-    # Step 1: Retry failed recordings
-    logger.info("\nStep 1: Retrying failed recordings...")
-    retry_failed_recordings(tracker, dry_run=args.dry_run)
+    if args.local:
+        # Local mode: process videos from LOCAL_VIDEOS_DIR
+        logger.info(f"Local mode: processing videos from {config.LOCAL_VIDEOS_DIR}")
 
-    # Step 2: Fetch and process new recordings
-    logger.info("\nStep 2: Fetching new recordings from Zoom...")
-    try:
-        access_token = zoom_client.get_access_token()
+        # Skip Zoom credential check in local mode
+        _check_credentials_local(args.dry_run)
 
-        to_date = datetime.now().strftime("%Y-%m-%d")
-        from_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
-
-        recordings = zoom_client.list_recordings(
-            access_token=access_token,
-            limit=config.LAST_MEETINGS_TO_PROCESS,
-            from_date=from_date,
-            to_date=to_date
-        )
-
-        logger.info(f"Found {len(recordings)} recording(s) to process")
-
-        # Sort by start_time so recordings are processed in chronological order
-        recordings.sort(key=lambda r: r.get('start_time', ''))
-
-        for idx, recording in enumerate(recordings, 1):
-            logger.info(f"\n[{idx}/{len(recordings)}] Processing recording...")
-            try:
-                process_recording(recording, tracker, dry_run=args.dry_run)
-            except Exception as e:
-                logger.error(f"Error processing recording: {e}", exc_info=True)
-                zoom_uuid = recording.get('uuid', '')
-                if zoom_uuid:
-                    _handle_error(
-                        tracker, zoom_uuid,
-                        recording.get('topic', 'Unknown Meeting'),
-                        recording.get('start_time', ''),
-                        f"Processing error: {e}",
-                    )
-
-    except Exception as e:
-        logger.error(f"Failed to fetch recordings: {e}", exc_info=True)
-        return
-
-    # Step 3: Cleanup old videos
-    logger.info("\nStep 3: Cleaning up old videos...")
-    if args.dry_run:
-        logger.info("[DRY RUN] Would clean up videos older than retention period")
+        process_local_videos(tracker, dry_run=args.dry_run)
     else:
-        cleanup_old_videos()
+        # Normal mode: fetch from Zoom
+        _check_credentials(args.dry_run)
+
+        # Step 1: Retry failed recordings
+        logger.info("\nStep 1: Retrying failed recordings...")
+        retry_failed_recordings(tracker, dry_run=args.dry_run)
+
+        # Step 2: Fetch and process new recordings
+        logger.info("\nStep 2: Fetching new recordings from Zoom...")
+        try:
+            access_token = zoom_client.get_access_token()
+
+            to_date = datetime.now().strftime("%Y-%m-%d")
+            from_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+
+            recordings = zoom_client.list_recordings(
+                access_token=access_token,
+                limit=config.LAST_MEETINGS_TO_PROCESS,
+                from_date=from_date,
+                to_date=to_date
+            )
+
+            logger.info(f"Found {len(recordings)} recording(s) to process")
+
+            # Sort by start_time so recordings are processed in chronological order
+            recordings.sort(key=lambda r: r.get('start_time', ''))
+
+            for idx, recording in enumerate(recordings, 1):
+                logger.info(f"\n[{idx}/{len(recordings)}] Processing recording...")
+                try:
+                    process_recording(recording, tracker, dry_run=args.dry_run)
+                except Exception as e:
+                    logger.error(f"Error processing recording: {e}", exc_info=True)
+                    zoom_uuid = recording.get('uuid', '')
+                    if zoom_uuid:
+                        _handle_error(
+                            tracker, zoom_uuid,
+                            recording.get('topic', 'Unknown Meeting'),
+                            recording.get('start_time', ''),
+                            f"Processing error: {e}",
+                        )
+
+        except Exception as e:
+            logger.error(f"Failed to fetch recordings: {e}", exc_info=True)
+            return
+
+        # Step 3: Cleanup old videos
+        logger.info("\nStep 3: Cleaning up old videos...")
+        if args.dry_run:
+            logger.info("[DRY RUN] Would clean up videos older than retention period")
+        else:
+            cleanup_old_videos()
 
     logger.info("\n" + "="*60)
     logger.info("Processing complete")

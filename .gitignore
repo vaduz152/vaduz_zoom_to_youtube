@@ -52,9 +52,10 @@ ENV/
 zoom_to_youtube.log
 youtube_uploads_log.txt
 
-# Test downloads (root directory)
+# Downloads and uploads
 test_downloads/
 downloaded_videos/
+videos_to_process/
 
 # Processed recordings tracker
 processed_recordings.csv

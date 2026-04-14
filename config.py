@@ -67,6 +67,9 @@ DISCORD_NOTIFICATION_TEMPLATE_PATH = Path(get_env(
     "DISCORD_NOTIFICATION_TEMPLATE_PATH", "./meeting-transcripts/prompts/discord_notification.txt"
 )).resolve()
 
+# Local video processing
+LOCAL_VIDEOS_DIR = Path(get_env("LOCAL_VIDEOS_DIR", "./videos_to_process")).resolve()
+
 # Ensure download directory exists
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
