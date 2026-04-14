@@ -4,10 +4,12 @@
 # Available variables:
 #   {title}           - Generated title (from Gemini), or Zoom meeting topic as fallback
 #   {youtube_url}     - YouTube video URL (e.g. https://youtu.be/abc123)
-#   {transcript_url}  - GitHub transcript URL, or "[транскрипт недоступен]" on error
+#   {transcript_url}  - GitHub transcript URL
+#   {summary_url}     - GitHub summary URL
 #   {datetime}        - Meeting date and time (e.g. 2026-03-06 13:17)
-#   {cost}            - Transcription cost (e.g. $0.15 (12,345 in / 8,421 out))
+#   {cost}            - Total Gemini cost (transcription + summary)
 **{title}**
 🎬 {youtube_url}
 📝 {transcript_url}
+📋 {summary_url}
 💰 {cost}

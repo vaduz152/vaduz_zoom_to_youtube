@@ -1,20 +1,22 @@
 # Zoom to YouTube Automation
 
-Automated system that downloads Zoom cloud recordings and uploads them to YouTube, with Discord notifications.
+Automated system that downloads Zoom cloud recordings and uploads them to YouTube, with transcripts, summaries, and Discord notifications.
 
 ## Features
 
 - **Automated Downloads**: Fetches new Zoom cloud recordings every 10 minutes
 - **Smart Video Selection**: Automatically selects the best video (gallery view preferred)
 - **YouTube Upload**: Uploads videos as unlisted to YouTube
-- **Discord Notifications**: Posts YouTube links to Discord channel via webhook
-- **Error Notifications**: Automatically sends Discord alerts when OAuth tokens expire or are revoked, and after repeated failures
-- **Success Notifications**: Notifies when errors are resolved after multiple failed attempts
-- **CSV Tracking**: Tracks all processed recordings in a CSV database
-- **Retry Logic**: Automatically retries failed operations on next run
-- **File Cleanup**: Automatically deletes old videos after retention period
-- **VTT Speaker Hints**: Uses Zoom's audio transcript (VTT) for accurate speaker attribution in Gemini transcription
-- **Token Management**: Automatically handles token expiration and prompts for re-authorization
+- **Gemini Transcription**: Transcribes videos with speaker diarization (VTT speaker hints for accuracy)
+- **Gemini Summaries**: Generates structured meeting summaries that adapt to what actually happened (check-ins, technical discussions, forums, meditations, etc.)
+- **Cross-linked Markdown**: Transcript and summary files carry links to each other and live in a private GitHub repo
+- **Discord Notifications**: Posts YouTube + transcript + summary + cost to a Discord channel via webhook
+- **Error Notifications**: Discord alerts for token expiration, repeated failures, or resolved errors
+- **CSV Tracking**: Tracks every step (download, upload, transcription, summary, notification) in a CSV database
+- **Smart Retry**: Next run picks up from exactly where the last run stopped — never re-runs completed steps
+- **Single-Record Mode**: Process one specific recording with `--zoom-uuid UUID` (useful for debugging or backfilling)
+- **Local Mode**: Process pre-downloaded videos from a folder with `--local`
+- **Token Management**: Automatically handles token expiration, retries transient 5xx/network errors
 - **Dry Run Mode**: Test without making actual changes
 
 ## Architecture
@@ -205,7 +207,7 @@ python main.py
 ### Manual Run
 
 ```bash
-# Normal run
+# Normal run (fetch + process new recordings)
 python main.py
 
 # Dry run (test without making changes)
@@ -213,6 +215,12 @@ python main.py --dry-run
 
 # Verbose logging
 python main.py --verbose
+
+# Process a single recording by Zoom UUID (respects CSV state, runs only missing steps)
+python main.py --zoom-uuid 'abc123=='
+
+# Process pre-downloaded videos from LOCAL_VIDEOS_DIR instead of Zoom cloud
+python main.py --local
 ```
 
 ### Cron Setup
@@ -248,17 +256,22 @@ All configuration is done via environment variables in `.env`:
 ## How It Works
 
 1. **Fetch Recordings**: Gets last N meetings from Zoom (configurable)
-2. **Check CSV**: Skips already processed recordings
+2. **Check CSV**: Skips recordings that are already fully processed (all steps done)
 3. **Select Best Video**: Chooses gallery view if available, falls back to speaker view
 4. **Detect Video Ready**: Records `video_ready_at` timestamp in CSV
 5. **Wait for VTT**: Checks if Zoom's audio transcript (VTT) is ready; if not, waits until next run
 6. **Detect VTT Ready**: Records `vtt_ready_at` timestamp in CSV (logs delay from video readiness)
 7. **Download**: Downloads video + VTT to `downloaded_videos/{meeting_folder}/`
 8. **Upload**: Uploads to YouTube as unlisted video
-9. **Transcribe**: Transcribes via Gemini with VTT speaker hints for accurate attribution
-10. **Notify**: Posts YouTube link to Discord
-11. **Track**: Records all operations in CSV
-12. **Retry**: On next run, retries any failed operations
+9. **Transcribe + Summarize**:
+    - Transcribes via Gemini with VTT speaker hints (chunked, 10-min segments)
+    - Generates a descriptive title from the transcript
+    - Generates a structured summary from the transcript (single universal prompt)
+    - Writes transcript and summary to the private `meeting-transcripts` GitHub repo in a single commit, with cross-references in each file header
+    - Updates YouTube video title to the generated one
+10. **Notify**: Posts YouTube + transcript + summary + total Gemini cost to Discord
+11. **Track**: Records all operations in CSV (including `transcribed_at`, `summarized_at`, `discord_notified_at`)
+12. **Retry**: On next run, picks up from exactly where the last run stopped — never re-runs completed steps. Missing summaries are generated from the existing transcript in the local clone (no re-transcription cost).
 13. **Cleanup**: Deletes videos older than retention period
 
 ## CSV Tracking
@@ -272,8 +285,13 @@ All processed recordings are tracked in `processed_recordings.csv`:
 - `zoom_downloaded_at`: Download timestamp
 - `youtube_uploaded_at`: Upload timestamp
 - `youtube_url`: YouTube video URL
+- `transcribed_at`: Transcription timestamp
+- `transcript_url`: GitHub URL to transcript
+- `generated_title`: Title generated from the transcript by Gemini
+- `summarized_at`: Summary generation timestamp
+- `summary_url`: GitHub URL to summary
 - `discord_notified_at`: Notification timestamp
-- `status`: Current status (`downloaded`, `uploaded`, `notified`, `failed`)
+- `status`: Current status (`downloaded`, `uploaded`, `transcribed`, `summarized`, `notified`, `failed`, `skipped`)
 - `error_message`: Error details if any step failed
 - `failure_count`: Number of consecutive failures (resets on success)
 - `error_notified_at`: Timestamp when error notification was last sent
@@ -283,21 +301,24 @@ All processed recordings are tracked in `processed_recordings.csv`:
 
 ## Error Handling
 
-- **Download failures**: Recorded in CSV, skipped on next run
-- **Upload failures**: Retried on next run if file exists
-- **Discord failures**: Retried on next run if upload succeeded
-- **Token expiration/revocation**: 
-  - Automatically detected for both Zoom and YouTube tokens
-  - Discord notification sent with error details
-  - Invalid token files are removed automatically
-  - Script prompts for re-authorization on next run
-  - OAuth flow starts automatically when tokens expire
-- **Retry-based notifications**:
-  - After `ERROR_NOTIFICATION_THRESHOLD` consecutive failures (default: 3), a Discord notification is sent
-  - Subsequent failures with the same error message do not trigger additional notifications (prevents spam)
-  - If the error message changes, a new notification is sent
-  - When an error is resolved after multiple failures, a success notification is sent
-  - Failure count resets on successful operations
+The pipeline is step-by-step: each step checks the CSV, and if the step is already done it is skipped. If any step fails, the record is marked as `failed`, the rest of the pipeline for that recording is aborted, and the next run resumes from the failed step — without re-running any earlier completed step. No duplicate YouTube uploads, no duplicate Discord notifications, no re-transcription.
+
+- **Transient HTTP errors (5xx, 429, network)**: API clients retry with exponential backoff (`retry_with_backoff` helper in `utils.py`). This covers Cloudflare errors on the Zoom OAuth token refresh endpoint, transient failures from YouTube / Gemini / Discord / GitHub, etc.
+- **Download failures**: Recorded in CSV, retried on next run.
+- **Upload failures**: Retried on next run if the video file still exists.
+- **Transcription / summary failures**: Transcription and summary are both mandatory. If either one fails, the pipeline stops at that record and the next run retries. On retry, if the transcript already exists in the private repo clone it is loaded from disk and only the summary is generated (no re-transcription cost).
+- **Discord failures**: Retried on next run; Discord is the final step, so retrying it does not trigger any re-work of earlier steps.
+- **Token expiration/revocation**:
+  - Automatically detected for both Zoom and YouTube tokens (distinguishes `invalid_grant` from transient 5xx).
+  - Discord notification sent with error details.
+  - Invalid token files are removed automatically.
+  - Script prompts for re-authorization on next run; OAuth flow starts automatically.
+- **Repeated-failure notifications**:
+  - After `ERROR_NOTIFICATION_THRESHOLD` consecutive failures (default: 3), a Discord notification is sent.
+  - Subsequent failures with the same error message do not trigger additional notifications (prevents spam).
+  - If the error message changes, a new notification is sent.
+  - When an error is resolved after multiple failures, a success notification is sent.
+  - Failure count resets on successful operations.
 
 ## Troubleshooting
 

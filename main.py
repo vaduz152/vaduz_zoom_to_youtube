@@ -12,10 +12,12 @@ from pathlib import Path
 
 import config
 import discord_client
+import summary_client
 import transcription_client
 import transcript_storage
 import youtube_client
 import zoom_client
+from transcription_client import UsageStats
 from video_manager import cleanup_old_videos
 from video_tracker import VideoTracker
 
@@ -232,79 +234,115 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
     else:
         logger.info(f"Already uploaded: {existing_record.get('youtube_url')}")
 
-    # Step 3: Transcribe with VTT hints + generate title + save transcript
+    # Step 3: Transcribe (if needed) + generate summary + save both with cross-refs
     existing_record = tracker.get_record(zoom_uuid)  # Refresh
     transcript_url = existing_record.get('transcript_url', '') if existing_record else ''
+    summary_url = existing_record.get('summary_url', '') if existing_record else ''
     generated_title = existing_record.get('generated_title', '') if existing_record else ''
-    transcription_cost = ''
+    total_cost = ''
 
-    if not existing_record or not existing_record.get('transcribed_at'):
+    needs_transcription = not existing_record or not existing_record.get('transcribed_at')
+    needs_summary = not existing_record or not existing_record.get('summarized_at')
+
+    if needs_transcription or needs_summary:
         if dry_run:
-            logger.info(f"[DRY RUN] Would transcribe: {file_path}")
+            logger.info(f"[DRY RUN] Would transcribe + summarize: {file_path}")
         else:
             try:
-                # Pass VTT path for speaker hints
-                vtt_for_transcription = str(vtt_path) if vtt_path.exists() else None
-                transcript, usage = transcription_client.transcribe_video(
-                    str(file_path), duration_seconds,
-                    vtt_path=vtt_for_transcription,
+                transcript_storage.sync_clone()
+                trans_usage = UsageStats()
+
+                if needs_transcription:
+                    vtt_for_transcription = str(vtt_path) if vtt_path.exists() else None
+                    transcript_body, trans_usage = transcription_client.transcribe_video(
+                        str(file_path), duration_seconds,
+                        vtt_path=vtt_for_transcription,
+                    )
+                    if not transcript_body:
+                        raise RuntimeError("Transcription returned no result")
+                    generated_title = transcription_client.generate_title(transcript_body, trans_usage) or ''
+                    transcript_storage.write_transcript_raw(
+                        transcript_body, folder_name, generated_title or None
+                    )
+
+                # Always load the body from the clone — unifies fresh and retry paths.
+                transcript_body = transcript_storage.load_transcript_body(
+                    folder_name, generated_title or None
                 )
-                if transcript:
-                    generated_title = transcription_client.generate_title(transcript, usage) or ''
 
-                    # Build full title with date/time prefix from start_time
-                    if generated_title:
-                        dt_prefix = _format_meeting_datetime(start_time).replace(':', '-')
-                        full_title = f"{dt_prefix} - {generated_title}" if dt_prefix else generated_title
-                    else:
-                        full_title = folder_name
+                summary_body, sum_usage = summary_client.generate_summary(transcript_body)
 
-                    # Add markdown header with title and date
-                    header_title = generated_title or meeting_topic or folder_name
-                    header_date = _format_meeting_datetime(start_time)
-                    header = f"# {header_title}\n\n**{header_date}**\n\n"
-                    transcript = header + transcript
+                if generated_title:
+                    dt_prefix = _format_meeting_datetime(start_time).replace(':', '-')
+                    full_title = f"{dt_prefix} - {generated_title}" if dt_prefix else generated_title
+                else:
+                    full_title = folder_name
 
-                    transcript_url = transcript_storage.save_transcript(
-                        transcript, folder_name, generated_title or None
-                    ) or ''
+                predicted_transcript_url, predicted_summary_url = transcript_storage.predict_urls(
+                    folder_name, generated_title or None
+                )
 
-                    # Update YouTube title
-                    youtube_url = existing_record.get('youtube_url', '') if existing_record else ''
-                    if generated_title and youtube_url:
-                        description = f"{config.YOUTUBE_DEFAULT_DESCRIPTION}\n\nFolder: {folder_name}"
-                        youtube_client.update_video_title(youtube_url, full_title, description)
+                header_title = generated_title or meeting_topic or folder_name
+                header_date = _format_meeting_datetime(start_time)
+                transcript_full = (
+                    f"# {header_title}\n\n"
+                    f"**{header_date}**\n\n"
+                    f"📋 [Саммари]({predicted_summary_url})\n\n"
+                    f"{transcript_body}"
+                )
+                summary_full = (
+                    f"# {header_title}\n\n"
+                    f"**{header_date}**\n\n"
+                    f"📝 [Транскрипт]({predicted_transcript_url})\n\n"
+                    f"{summary_body}"
+                )
 
-                    # Rename folder to match generated title
-                    if generated_title and full_title != folder_name:
-                        new_folder_path = config.DOWNLOAD_DIR / full_title
-                        try:
-                            file_path.parent.rename(new_folder_path)
-                            file_path = new_folder_path / file_path.name
-                            folder_name = full_title
-                            logger.info(f"Renamed folder to: {full_title}")
-                        except OSError as e:
-                            logger.warning(f"Could not rename folder: {e}")
+                transcript_url, summary_url = transcript_storage.save_transcript_and_summary(
+                    transcript_full, summary_full, folder_name, generated_title or None
+                )
 
+                youtube_url = existing_record.get('youtube_url', '') if existing_record else ''
+                if needs_transcription and generated_title and youtube_url:
+                    description = f"{config.YOUTUBE_DEFAULT_DESCRIPTION}\n\nFolder: {folder_name}"
+                    youtube_client.update_video_title(youtube_url, full_title, description)
+
+                if needs_transcription and generated_title and full_title != folder_name:
+                    new_folder_path = config.DOWNLOAD_DIR / full_title
+                    try:
+                        file_path.parent.rename(new_folder_path)
+                        file_path = new_folder_path / file_path.name
+                        folder_name = full_title
+                        logger.info(f"Renamed folder to: {full_title}")
+                    except OSError as e:
+                        logger.warning(f"Could not rename folder: {e}")
+
+                if needs_transcription:
                     had_failures = tracker.record_transcription(
                         zoom_uuid, transcript_url, generated_title
                     )
-                    transcription_cost = usage.cost_string()
-                    logger.info(f"Transcription complete: {full_title} ({transcription_cost})")
-                    _notify_if_resolved(had_failures, zoom_uuid, meeting_topic, "Transcription")
                 else:
-                    logger.info("Transcription skipped or returned no result")
+                    had_failures = False
+                tracker.record_summary(zoom_uuid, summary_url)
+
+                total_tokens = UsageStats(
+                    input_tokens=trans_usage.input_tokens + sum_usage.input_tokens,
+                    output_tokens=trans_usage.output_tokens + sum_usage.output_tokens,
+                )
+                total_cost = total_tokens.cost_string()
+                logger.info(f"Transcription + summary complete: {full_title} ({total_cost})")
+                _notify_if_resolved(had_failures, zoom_uuid, meeting_topic, "Transcription+Summary")
             except Exception as e:
-                logger.warning(f"Transcription step failed: {e}")
-                _handle_error(tracker, zoom_uuid, meeting_topic, start_time, f"Transcription failed: {e}")
-                # Continue to Discord notification without transcript
+                logger.error(f"Transcription/summary step failed: {e}")
+                _handle_error(tracker, zoom_uuid, meeting_topic, start_time, f"Transcription/summary failed: {e}")
+                return
     else:
-        logger.info(f"Already transcribed: {transcript_url}")
+        logger.info(f"Already transcribed + summarized: {transcript_url}")
 
     # Step 4: Send Discord notification
     existing_record = tracker.get_record(zoom_uuid)  # Refresh
     youtube_url = existing_record.get('youtube_url', '') if existing_record else ''
     transcript_url = existing_record.get('transcript_url', '') if existing_record else ''
+    summary_url = existing_record.get('summary_url', '') if existing_record else ''
     generated_title = existing_record.get('generated_title', '') if existing_record else ''
 
     if not existing_record or not existing_record.get('discord_notified_at'):
@@ -319,10 +357,11 @@ def process_recording(recording: dict, tracker: VideoTracker, dry_run: bool = Fa
                 success = discord_client.send_notification(
                     youtube_url,
                     transcript_url=transcript_url or None,
+                    summary_url=summary_url or None,
                     generated_title=generated_title or None,
                     meeting_topic=meeting_topic,
                     meeting_datetime=_format_meeting_datetime(start_time),
-                    transcription_cost=transcription_cost or None,
+                    transcription_cost=total_cost or None,
                 )
                 if success:
                     had_failures = tracker.record_notification(zoom_uuid)
@@ -497,77 +536,118 @@ def process_local_recording(
     else:
         logger.info(f"Already uploaded: {existing_record.get('youtube_url')}")
 
-    # Step 3: Transcribe + generate title + save transcript
+    # Step 3: Transcribe (if needed) + generate summary + save both with cross-refs
     existing_record = tracker.get_record(local_uuid)
     transcript_url = existing_record.get('transcript_url', '') if existing_record else ''
+    summary_url = existing_record.get('summary_url', '') if existing_record else ''
     generated_title = existing_record.get('generated_title', '') if existing_record else ''
-    transcription_cost = ''
+    total_cost = ''
 
-    if not existing_record or not existing_record.get('transcribed_at'):
+    needs_transcription = not existing_record or not existing_record.get('transcribed_at')
+    needs_summary = not existing_record or not existing_record.get('summarized_at')
+
+    if needs_transcription or needs_summary:
         if dry_run:
-            logger.info(f"[DRY RUN] Would transcribe: {dest_video}")
+            logger.info(f"[DRY RUN] Would transcribe + summarize: {dest_video}")
         else:
             try:
-                vtt_for_transcription = str(dest_vtt) if dest_vtt and dest_vtt.exists() else None
-                if vtt_for_transcription:
-                    logger.info(f"Using VTT hints: {dest_vtt.name}")
-                else:
-                    logger.info("No VTT available, transcribing without speaker hints")
-                transcript, usage = transcription_client.transcribe_video(
-                    str(dest_video), duration_seconds,
-                    vtt_path=vtt_for_transcription,
-                )
-                if transcript:
-                    generated_title = transcription_client.generate_title(transcript, usage) or ''
+                transcript_storage.sync_clone()
+                trans_usage = UsageStats()
 
-                    if generated_title:
-                        dt_prefix = _format_meeting_datetime(start_time).replace(':', '-')
-                        full_title = f"{dt_prefix} - {generated_title}" if dt_prefix else generated_title
+                if needs_transcription:
+                    vtt_for_transcription = str(dest_vtt) if dest_vtt and dest_vtt.exists() else None
+                    if vtt_for_transcription:
+                        logger.info(f"Using VTT hints: {dest_vtt.name}")
                     else:
-                        full_title = folder_name
+                        logger.info("No VTT available, transcribing without speaker hints")
+                    transcript_body, trans_usage = transcription_client.transcribe_video(
+                        str(dest_video), duration_seconds,
+                        vtt_path=vtt_for_transcription,
+                    )
+                    if not transcript_body:
+                        raise RuntimeError("Transcription returned no result")
+                    generated_title = transcription_client.generate_title(transcript_body, trans_usage) or ''
+                    transcript_storage.write_transcript_raw(
+                        transcript_body, folder_name, generated_title or None
+                    )
 
-                    header_title = generated_title or meeting_topic or folder_name
-                    header_date = _format_meeting_datetime(start_time)
-                    header = f"# {header_title}\n\n**{header_date}**\n\n"
-                    transcript = header + transcript
+                transcript_body = transcript_storage.load_transcript_body(
+                    folder_name, generated_title or None
+                )
 
-                    transcript_url = transcript_storage.save_transcript(
-                        transcript, folder_name, generated_title or None
-                    ) or ''
+                summary_body, sum_usage = summary_client.generate_summary(transcript_body)
 
-                    youtube_url = existing_record.get('youtube_url', '') if existing_record else ''
-                    if generated_title and youtube_url:
-                        description = f"{config.YOUTUBE_DEFAULT_DESCRIPTION}\n\nFolder: {folder_name}"
-                        youtube_client.update_video_title(youtube_url, full_title, description)
+                if generated_title:
+                    dt_prefix = _format_meeting_datetime(start_time).replace(':', '-')
+                    full_title = f"{dt_prefix} - {generated_title}" if dt_prefix else generated_title
+                else:
+                    full_title = folder_name
 
-                    if generated_title and full_title != folder_name:
-                        new_folder_path = config.DOWNLOAD_DIR / full_title
-                        try:
-                            dest_video.parent.rename(new_folder_path)
-                            dest_video = new_folder_path / dest_video.name
-                            folder_name = full_title
-                            logger.info(f"Renamed folder to: {full_title}")
-                        except OSError as e:
-                            logger.warning(f"Could not rename folder: {e}")
+                predicted_transcript_url, predicted_summary_url = transcript_storage.predict_urls(
+                    folder_name, generated_title or None
+                )
 
+                header_title = generated_title or meeting_topic or folder_name
+                header_date = _format_meeting_datetime(start_time)
+                transcript_full = (
+                    f"# {header_title}\n\n"
+                    f"**{header_date}**\n\n"
+                    f"📋 [Саммари]({predicted_summary_url})\n\n"
+                    f"{transcript_body}"
+                )
+                summary_full = (
+                    f"# {header_title}\n\n"
+                    f"**{header_date}**\n\n"
+                    f"📝 [Транскрипт]({predicted_transcript_url})\n\n"
+                    f"{summary_body}"
+                )
+
+                transcript_url, summary_url = transcript_storage.save_transcript_and_summary(
+                    transcript_full, summary_full, folder_name, generated_title or None
+                )
+
+                youtube_url = existing_record.get('youtube_url', '') if existing_record else ''
+                if needs_transcription and generated_title and youtube_url:
+                    description = f"{config.YOUTUBE_DEFAULT_DESCRIPTION}\n\nFolder: {folder_name}"
+                    youtube_client.update_video_title(youtube_url, full_title, description)
+
+                if needs_transcription and generated_title and full_title != folder_name:
+                    new_folder_path = config.DOWNLOAD_DIR / full_title
+                    try:
+                        dest_video.parent.rename(new_folder_path)
+                        dest_video = new_folder_path / dest_video.name
+                        folder_name = full_title
+                        logger.info(f"Renamed folder to: {full_title}")
+                    except OSError as e:
+                        logger.warning(f"Could not rename folder: {e}")
+
+                if needs_transcription:
                     had_failures = tracker.record_transcription(
                         local_uuid, transcript_url, generated_title
                     )
-                    transcription_cost = usage.cost_string()
-                    logger.info(f"Transcription complete: {folder_name} ({transcription_cost})")
-                    _notify_if_resolved(had_failures, local_uuid, meeting_topic, "Transcription")
                 else:
-                    logger.info("Transcription skipped or returned no result")
+                    had_failures = False
+                tracker.record_summary(local_uuid, summary_url)
+
+                total_tokens = UsageStats(
+                    input_tokens=trans_usage.input_tokens + sum_usage.input_tokens,
+                    output_tokens=trans_usage.output_tokens + sum_usage.output_tokens,
+                )
+                total_cost = total_tokens.cost_string()
+                logger.info(f"Transcription + summary complete: {folder_name} ({total_cost})")
+                _notify_if_resolved(had_failures, local_uuid, meeting_topic, "Transcription+Summary")
             except Exception as e:
-                logger.warning(f"Transcription step failed: {e}")
-                _handle_error(tracker, local_uuid, meeting_topic, start_time, f"Transcription failed: {e}")
+                logger.error(f"Transcription/summary step failed: {e}")
+                _handle_error(tracker, local_uuid, meeting_topic, start_time, f"Transcription/summary failed: {e}")
+                return
     else:
-        logger.info(f"Already transcribed: {transcript_url}")
+        logger.info(f"Already transcribed + summarized: {transcript_url}")
 
     # Step 4: Send Discord notification
     existing_record = tracker.get_record(local_uuid)
     youtube_url = existing_record.get('youtube_url', '') if existing_record else ''
     transcript_url = existing_record.get('transcript_url', '') if existing_record else ''
+    summary_url = existing_record.get('summary_url', '') if existing_record else ''
     generated_title = existing_record.get('generated_title', '') if existing_record else ''
 
     if not existing_record or not existing_record.get('discord_notified_at'):
@@ -581,10 +661,11 @@ def process_local_recording(
                 success = discord_client.send_notification(
                     youtube_url,
                     transcript_url=transcript_url or None,
+                    summary_url=summary_url or None,
                     generated_title=generated_title or None,
                     meeting_topic=meeting_topic,
                     meeting_datetime=_format_meeting_datetime(start_time),
-                    transcription_cost=transcription_cost or None,
+                    transcription_cost=total_cost or None,
                 )
                 if success:
                     had_failures = tracker.record_notification(local_uuid)
@@ -739,6 +820,7 @@ def _check_credentials(dry_run: bool) -> None:
     for label, path in [
         ("Transcription prompt", config.TRANSCRIPTION_PROMPT_PATH),
         ("Title prompt", config.TITLE_PROMPT_PATH),
+        ("Summary prompt", config.SUMMARY_PROMPT_PATH),
     ]:
         if path.exists():
             logger.info(f"  {label}: OK")
@@ -815,6 +897,7 @@ def _check_credentials_local(dry_run: bool) -> None:
     for label, path in [
         ("Transcription prompt", config.TRANSCRIPTION_PROMPT_PATH),
         ("Title prompt", config.TITLE_PROMPT_PATH),
+        ("Summary prompt", config.SUMMARY_PROMPT_PATH),
     ]:
         if path.exists():
             logger.info(f"  {label}: OK")
@@ -829,6 +912,79 @@ def _check_credentials_local(dry_run: bool) -> None:
             sys.exit(1)
         else:
             logger.warning(f"Credential issues detected: {summary}")
+
+
+def reprocess_summary_by_uuid(zoom_uuid: str, tracker: VideoTracker, dry_run: bool = False) -> None:
+    """Generate and push summary for a single already-transcribed record.
+
+    Reads the record from CSV, loads the transcript body from the local clone,
+    runs summary generation, and writes both files (with cross-refs) in a single
+    commit. Does not touch Zoom, YouTube, or Discord.
+    """
+    record = tracker.get_record(zoom_uuid)
+    if not record:
+        logger.error(f"No CSV record for UUID: {zoom_uuid}")
+        return
+    if not record.get('transcribed_at'):
+        logger.error(f"Record has no transcript: {zoom_uuid}")
+        return
+    if record.get('summarized_at'):
+        logger.info(f"Already summarized: {zoom_uuid}")
+        return
+
+    file_path_str = record.get('file_path', '')
+    if not file_path_str:
+        logger.error(f"Record has no file_path: {zoom_uuid}")
+        return
+
+    folder_name = Path(file_path_str).parent.name
+    generated_title = record.get('generated_title', '')
+    meeting_topic = record.get('meeting_topic', '')
+    start_time = record.get('start_time', '')
+
+    logger.info(f"Reprocessing summary for {zoom_uuid[:8]}...: {folder_name}")
+
+    if dry_run:
+        logger.info(f"[DRY RUN] Would generate summary from clone transcript and push")
+        return
+
+    try:
+        transcript_storage.sync_clone()
+        transcript_body = transcript_storage.load_transcript_body(
+            folder_name, generated_title or None
+        )
+
+        summary_body, sum_usage = summary_client.generate_summary(transcript_body)
+
+        predicted_transcript_url, predicted_summary_url = transcript_storage.predict_urls(
+            folder_name, generated_title or None
+        )
+
+        header_title = generated_title or meeting_topic or folder_name
+        header_date = _format_meeting_datetime(start_time)
+        transcript_full = (
+            f"# {header_title}\n\n"
+            f"**{header_date}**\n\n"
+            f"📋 [Саммари]({predicted_summary_url})\n\n"
+            f"{transcript_body}"
+        )
+        summary_full = (
+            f"# {header_title}\n\n"
+            f"**{header_date}**\n\n"
+            f"📝 [Транскрипт]({predicted_transcript_url})\n\n"
+            f"{summary_body}"
+        )
+
+        _, summary_url = transcript_storage.save_transcript_and_summary(
+            transcript_full, summary_full, folder_name, generated_title or None
+        )
+
+        tracker.record_summary(zoom_uuid, summary_url)
+        logger.info(f"Summary added: {summary_url} ({sum_usage.cost_string()})")
+    except Exception as e:
+        logger.error(f"Reprocess summary failed: {e}", exc_info=True)
+        _handle_error(tracker, zoom_uuid, meeting_topic, start_time, f"Summary failed: {e}")
+        raise
 
 
 def main() -> None:
@@ -850,6 +1006,11 @@ def main() -> None:
         "--local",
         action="store_true",
         help="Process local videos from LOCAL_VIDEOS_DIR instead of Zoom cloud"
+    )
+    parser.add_argument(
+        "--zoom-uuid",
+        help="Run the full pipeline for a single record (fetches from Zoom, respects CSV state; "
+             "falls back to summary-only if the record is no longer in Zoom cloud)",
     )
     args = parser.parse_args()
 
@@ -878,7 +1039,47 @@ def main() -> None:
 
     tracker = VideoTracker()
 
-    if args.local:
+    if args.zoom_uuid:
+        logger.info(f"Single-record mode: {args.zoom_uuid}")
+        _check_credentials(args.dry_run)
+
+        matching = []
+        try:
+            access_token = zoom_client.get_access_token()
+            to_date = datetime.now().strftime("%Y-%m-%d")
+            from_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+            recordings = zoom_client.list_recordings(
+                access_token=access_token,
+                from_date=from_date,
+                to_date=to_date,
+            )
+            matching = [r for r in recordings if r.get('uuid') == args.zoom_uuid]
+        except Exception as e:
+            logger.warning(f"Failed to fetch from Zoom: {e}")
+
+        if matching:
+            logger.info(f"Found {args.zoom_uuid[:8]}... in Zoom cloud — running full pipeline")
+            for rec in matching:
+                try:
+                    process_recording(rec, tracker, dry_run=args.dry_run)
+                except Exception as e:
+                    logger.error(f"Error processing recording: {e}", exc_info=True)
+                    _handle_error(
+                        tracker, args.zoom_uuid,
+                        rec.get('topic', 'Unknown Meeting'),
+                        rec.get('start_time', ''),
+                        f"Processing error: {e}",
+                    )
+        else:
+            record = tracker.get_record(args.zoom_uuid)
+            if record and record.get('transcribed_at') and not record.get('summarized_at'):
+                logger.info("Not in Zoom cloud but transcript exists — running summary-only fallback")
+                reprocess_summary_by_uuid(args.zoom_uuid, tracker, dry_run=args.dry_run)
+            else:
+                logger.error(
+                    f"Record not in Zoom cloud and not eligible for summary fallback: {args.zoom_uuid}"
+                )
+    elif args.local:
         # Local mode: process videos from LOCAL_VIDEOS_DIR
         logger.info(f"Local mode: processing videos from {config.LOCAL_VIDEOS_DIR}")
 

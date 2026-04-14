@@ -6,11 +6,12 @@ An automated system that runs every 10 minutes via cron to:
 1. Download new Zoom cloud recordings (best video per meeting)
 2. Upload them to YouTube as unlisted videos
 3. Transcribe video via Gemini API and generate a descriptive title
-4. Update YouTube video title with the generated title
-5. Save transcript to a GitHub repository
-6. Track all operations in a CSV file
-7. Post YouTube link + transcript link to Discord via webhook
-8. Clean up old videos after retention period
+4. Generate a structured meeting summary via Gemini API
+5. Save transcript + summary to a private GitHub repository in a single commit, with cross-references between the two files
+6. Update YouTube video title with the generated title
+7. Track all operations in a CSV file
+8. Post YouTube link + transcript link + summary link + total Gemini cost to Discord via webhook
+9. Clean up old videos after retention period
 
 ## Project Structure
 
@@ -24,7 +25,8 @@ vaduz_zoom_to_youtube/
 ├── youtube_client.py             # YouTube API client (upload + title update)
 ├── discord_client.py             # Discord webhook client (template-based)
 ├── transcription_client.py       # Gemini API client (transcription + title generation)
-├── transcript_storage.py         # Git-based transcript storage (GitHub)
+├── summary_client.py             # Gemini API client (meeting summary generation)
+├── transcript_storage.py         # Git-based transcript + summary storage (GitHub)
 ├── video_tracker.py              # CSV tracking logic
 ├── video_manager.py              # File cleanup logic
 ├── utils.py                      # Shared utilities (retry_with_backoff)
@@ -83,34 +85,39 @@ Main entry point - orchestrates the entire flow:
 **Flow:**
 1. Load configuration
 2. Initialize clients (Zoom, YouTube, Discord, Tracker)
-3. Get access tokens (refresh if needed)
-4. Fetch recordings from Zoom (last N meetings)
-5. For each recording:
-   - Check if already processed (by UUID in CSV)
-   - Skip if already fully processed (downloaded + uploaded + transcribed + notified)
-   - If partially processed, retry from failed step
-   - Find best video file (gallery view preferred)
-   - Check minimum length requirement
+3. Validate credentials and prompt files
+4. Get access tokens (refresh if needed)
+5. Fetch recordings from Zoom (last N meetings)
+6. For each recording:
+   - Check if already processed (by UUID in CSV). Fully processed = all of: downloaded, uploaded, transcribed, summarized, notified
+   - If partially processed, pick up at the first missing step
+   - Find best video file (gallery view preferred) and check minimum length
    - **Detect video readiness** → record `video_ready_at` in CSV
    - **Check VTT readiness** → if VTT not yet available, skip (wait for next run)
    - **Record VTT readiness** → record `vtt_ready_at` in CSV, log delay
    - Download video + VTT to `downloaded_videos/{meeting_folder}/`
    - Upload to YouTube (if not already uploaded)
-   - Transcribe via Gemini API (chunked, 10-min segments with VTT speaker hints)
-   - Generate descriptive title from transcript
-   - Save transcript to GitHub repository
-   - Update YouTube video title (date/time prefix + generated title)
-   - Rename local folder to match new title
-   - Post YouTube link + transcript link to Discord (if not already notified)
-   - Record in CSV with all metadata
-6. Clean up old videos (older than retention period)
-7. Exit
+   - **Transcription + summary step (unified):**
+     - If transcript missing: transcribe via Gemini (chunked, 10-min segments with VTT speaker hints), generate descriptive title, write raw transcript to the local clone at `meeting-transcripts/transcripts/{filename}.md`
+     - Load transcript body from the local clone (stripping any existing header)
+     - Generate a structured summary from the body via Gemini
+     - Compute GitHub URLs for both files in advance
+     - Build full transcript + summary content with headers and cross-references (`📋 [Саммари](...)` and `📝 [Транскрипт](...)` respectively)
+     - Save both files in a single git commit to the `meeting-transcripts` repo
+     - Update YouTube video title to the generated title (only on fresh transcription)
+     - Rename local folder to match the generated title (only on fresh transcription)
+     - Record `transcribed_at` + `summarized_at` in CSV
+   - Post YouTube + transcript + summary + total Gemini cost to Discord (if not already notified)
+7. Clean up old videos (older than retention period)
+8. Exit
 
-**Graceful degradation:** Transcription failure does not block YouTube upload or Discord notification. If transcription fails, Discord message shows `[транскрипт недоступен]` instead of transcript link.
+**No graceful degradation:** Transcription and summary are both mandatory. If either step fails, the record is marked as failed and the rest of the pipeline for that recording is aborted. The next run resumes from the failed step. Because the transcript is cached in the local clone, a missing-summary retry does not re-transcribe — it only regenerates the summary.
 
 **Command-line arguments:**
 - `--dry-run`: Test mode (no downloads/uploads, just logging)
 - `--verbose`: Increase logging verbosity
+- `--local`: Process pre-downloaded videos from `LOCAL_VIDEOS_DIR` instead of Zoom cloud (uses content-hash UUIDs)
+- `--zoom-uuid UUID`: Process a single record by Zoom UUID. Tries to fetch it from Zoom cloud and runs `process_recording` on it (respects CSV state). If the record is no longer in Zoom but has a transcript in CSV, falls back to a summary-only reprocess via `reprocess_summary_by_uuid`.
 
 ### 3. `zoom_client.py`
 Zoom API operations (extracted from prototype):
@@ -145,11 +152,11 @@ YouTube API operations (extracted from prototype):
 Discord webhook operations with customizable template:
 
 **Functions:**
-- `send_notification(youtube_url, transcript_url, generated_title, meeting_topic)` - Post notification to Discord
+- `send_notification(youtube_url, transcript_url, summary_url, generated_title, meeting_topic, meeting_datetime, transcription_cost)` - Post notification to Discord
 - `send_error_notification(error_message, error_details)` - Post error notification
 - Returns success/failure status
 
-**Message template:** Loaded from `meeting-transcripts/prompts/discord_notification.txt`, uses `str.format()` with variables `{title}`, `{youtube_url}`, `{transcript_url}`. Lines starting with `#` are stripped (comments).
+**Message template:** Loaded from `meeting-transcripts/prompts/discord_notification.txt`, uses `str.format()` with variables `{title}`, `{youtube_url}`, `{transcript_url}`, `{summary_url}`, `{datetime}`, `{cost}`. Lines starting with `#` are stripped (comments).
 
 ### 5a. `transcription_client.py`
 Gemini API client for video transcription with VTT speaker hints:
@@ -169,39 +176,48 @@ Gemini API client for video transcription with VTT speaker hints:
 
 **Configuration:** `GEMINI_API_KEY`, `GEMINI_MODEL`, `TRANSCRIPTION_PROMPT_PATH`, `TITLE_PROMPT_PATH`, `MAX_TRANSCRIPTION_DURATION`
 
-### 5b. `transcript_storage.py`
-Git-based transcript storage:
+### 5b. `summary_client.py`
+Gemini API client for generating structured meeting summaries:
 
 **Functions:**
-- `save_transcript(transcript, folder_name, title)` - Save transcript to GitHub repo, returns GitHub URL or `None`
-- `derive_filename(folder_name, title)` - Generate filename from folder name and title
+- `generate_summary(transcript)` - Generate a summary from a transcript. Returns `(summary_text, UsageStats)`. Raises on failure.
 
-**Git strategy:** Persistent local clone in `./transcripts/`. On each run: `git pull --rebase` → write file → `git add` + `git commit` + `git push`. Dirty state from failed runs is reset automatically.
+**Prompt:** Single universal prompt at `meeting-transcripts/prompts/summary_prompt.txt`. The prompt describes the possible meeting formats (check-in, technical discussion, forum, meditation, knowledge-sharing, vision/sense-making) and asks Gemini to adapt the output structure to what actually happened, in strict chronological order. The prompt also instructs Gemini to match the team's vocabulary and tone.
+
+**Configuration:** `GEMINI_API_KEY`, `GEMINI_MODEL`, `SUMMARY_PROMPT_PATH`
+
+### 5c. `transcript_storage.py`
+Git-based storage for transcripts and summaries in a private GitHub repo.
+
+**Functions:**
+- `sync_clone()` - Ensure the repo is cloned, pulled to latest, and clean of dirty state. Call once at the start of the transcript+summary step.
+- `write_transcript_raw(transcript_body, folder_name, title)` - Write a raw transcript to the local clone without committing. Used right after fresh transcription so that subsequent code paths can uniformly load the transcript from disk.
+- `load_transcript_body(folder_name, title)` - Load a transcript from the local clone and strip any existing header (everything before the first `[MM:SS]` line). Unifies fresh-run and retry paths.
+- `predict_urls(folder_name, title)` - Compute `(transcript_url, summary_url)` in advance so that each file can be written with a cross-reference header pointing at the other.
+- `save_transcript_and_summary(transcript, summary, folder_name, title)` - Write both files to the clone, `git add` both, commit with a single message, and push. Returns `(transcript_url, summary_url)`. Raises on failure.
+- `derive_filename(folder_name, title)` - Generate a stable filename (`{date_time} - {title}.md`) used for both transcripts/ and summaries/.
+
+**Git strategy:** Persistent local clone of the private `meeting-transcripts` repo. The caller is expected to call `sync_clone()` once per step; individual write/load helpers do not touch git. Dirty state from failed runs is reset automatically at the next `sync_clone()` call.
 
 **Configuration:** `TRANSCRIPTS_REPO_URL`, `TRANSCRIPTS_REPO_PATH`, `TRANSCRIPTS_GITHUB_REPO`
 
 ### 6. `video_tracker.py`
-CSV tracking database:
-
-**CSV Structure:**
-```csv
-zoom_uuid,meeting_topic,start_time,file_path,zoom_downloaded_at,youtube_uploaded_at,youtube_url,discord_notified_at,status,error_message,transcribed_at,transcript_url,generated_title
-```
+CSV tracking database.
 
 **Functions:**
-- `is_processed(uuid)` - Check if recording already processed (transcription is optional — not required for "processed")
+- `is_processed(uuid)` - Check if recording is fully processed. A recording is "processed" only when all of `zoom_downloaded_at`, `youtube_uploaded_at`, `transcribed_at`, `summarized_at`, `discord_notified_at` are set (or `status=skipped`).
 - `record_video_ready(uuid, meeting_topic, start_time)` - Record when video first appeared in Zoom cloud
 - `record_vtt_ready(uuid)` - Record when VTT transcript appeared (logs delay from video readiness)
 - `record_download(uuid, meeting_topic, start_time, file_path)` - Record download
 - `record_upload(uuid, youtube_url)` - Record upload
 - `record_transcription(uuid, transcript_url, generated_title)` - Record transcription
+- `record_summary(uuid, summary_url)` - Record summary
 - `record_notification(uuid)` - Record Discord notification
-- `record_error(uuid, error_message)` - Record error
+- `record_error(uuid, error_message)` - Record error (increments failure_count, maybe triggers Discord alert)
+- `record_skipped(uuid, reason)` - Mark recording as permanently skipped (e.g. too short)
 - `get_all_records()` - Read all records (for cleanup)
 
-**Deduplication:**
-- Uses `zoom_uuid` as primary key
-- Prevents reprocessing same recording
+**Deduplication:** Uses `zoom_uuid` as primary key; prevents reprocessing the same recording.
 
 ### 7. `video_manager.py`
 File management and cleanup:
@@ -214,28 +230,30 @@ File management and cleanup:
 ## CSV Tracking Schema
 
 ```csv
-zoom_uuid,meeting_topic,start_time,file_path,zoom_downloaded_at,youtube_uploaded_at,youtube_url,discord_notified_at,status,error_message,transcribed_at,transcript_url,generated_title,failure_count,error_notified_at,last_notified_error,video_ready_at,vtt_ready_at
+zoom_uuid,meeting_topic,start_time,file_path,video_ready_at,vtt_ready_at,zoom_downloaded_at,youtube_uploaded_at,youtube_url,discord_notified_at,status,error_message,failure_count,error_notified_at,last_notified_error,transcribed_at,transcript_url,generated_title,summarized_at,summary_url
 ```
 
 **Fields:**
 - `zoom_uuid`: Unique Zoom recording ID (primary key)
 - `meeting_topic`: Meeting name/title
 - `start_time`: ISO 8601 timestamp
-- `file_path`: Local file path relative to repo root
+- `file_path`: Local file path
+- `video_ready_at`: ISO timestamp when video first appeared in Zoom cloud
+- `vtt_ready_at`: ISO timestamp when VTT transcript first appeared in Zoom cloud
 - `zoom_downloaded_at`: ISO timestamp when downloaded
 - `youtube_uploaded_at`: ISO timestamp when uploaded (empty if failed)
 - `youtube_url`: YouTube video URL (empty if not uploaded)
 - `discord_notified_at`: ISO timestamp when Discord notification sent (empty if failed)
-- `status`: `waiting_for_vtt`, `downloaded`, `uploaded`, `notified`, `failed`
+- `status`: `waiting_for_vtt`, `downloaded`, `uploaded`, `transcribed`, `summarized`, `notified`, `failed`, `skipped`
 - `error_message`: Error details if any step failed
-- `transcribed_at`: ISO timestamp when transcribed (empty if not transcribed)
-- `transcript_url`: GitHub URL to transcript (empty if not saved)
-- `generated_title`: Title generated by Gemini (empty if not generated)
 - `failure_count`: Number of consecutive failures (resets on success)
 - `error_notified_at`: Timestamp when error notification was last sent
 - `last_notified_error`: Last error message that triggered a notification
-- `video_ready_at`: ISO timestamp when video first appeared in Zoom cloud
-- `vtt_ready_at`: ISO timestamp when VTT transcript first appeared in Zoom cloud
+- `transcribed_at`: ISO timestamp when transcribed (empty if not transcribed)
+- `transcript_url`: GitHub URL to transcript (empty if not saved)
+- `generated_title`: Title generated by Gemini (empty if not generated)
+- `summarized_at`: ISO timestamp when summary generated (empty if not done)
+- `summary_url`: GitHub URL to summary (empty if not saved)
 
 ## Video Selection Logic
 
@@ -250,16 +268,19 @@ zoom_uuid,meeting_topic,start_time,file_path,zoom_downloaded_at,youtube_uploaded
 
 ## Error Handling
 
-- **Download failure**: Record error in CSV, skip to next recording
-- **Upload failure**: Keep video file, record error in CSV with status `failed`, retry on next run (if status is `failed` and file exists, attempt upload again)
-- **Transcription failure**: Log warning, continue to Discord notification with `[транскрипт недоступен]`. Send error notification if error threshold reached
-- **Discord failure**: Record error in CSV, but don't fail entire process, retry on next run if upload succeeded
-- **Token refresh failure**: Log error, exit (requires manual intervention)
+The pipeline is stepwise: each step is guarded by a CSV flag, so the next run always resumes from the first missing step. A step that fails stops the pipeline for that recording and sets its status to `failed`. No Discord notification is sent until everything (download, upload, transcription, summary) succeeds.
+
+- **Transient HTTP errors (5xx, 429, connection/timeout)**: API clients retry with exponential backoff via `utils.retry_with_backoff`. The Zoom OAuth token refresh distinguishes `invalid_grant` (token genuinely expired → trigger re-auth) from transient 5xx (retry and propagate without touching the token file). YouTube uploads, Gemini calls, GitHub pushes, and Discord webhooks all use the same retry helper.
+- **Download failure**: Record error in CSV; retried on next run.
+- **Upload failure**: Keep video file; status `failed`; retried on next run if file still exists.
+- **Transcription / summary failure**: Both steps are mandatory and treated as a single unit. If either one fails, the record is marked failed and the pipeline stops. On retry, if the transcript already exists in the local clone it is loaded via `load_transcript_body` and only the summary is regenerated — no re-transcription cost.
+- **Discord failure**: Record error in CSV; retried on next run (no earlier step is re-run).
+- **Token refresh failure**: Distinguishes token-expired (re-auth flow) from transient errors (retry with backoff).
 
 **Retry Logic:**
-- On each run, check CSV for records with `status=failed` or missing `youtube_url`
-- If video file still exists, retry the failed operation
-- Prevents permanent failures due to transient network issues
+- On each run, `retry_failed_recordings` in `main.py` finds records with `status=failed` or an incomplete stage (e.g. uploaded but not notified) and retries them.
+- `--zoom-uuid UUID` lets you manually target a single record for retry / reprocessing.
+- Because every completed step is flagged in the CSV, retries never re-do completed work (no duplicate YouTube uploads, no duplicate Discord notifications, no wasted transcription tokens).
 
 ## Cron Configuration
 
@@ -317,11 +338,12 @@ DOWNLOAD_DIR=./downloaded_videos
 CSV_TRACKER_PATH=./processed_recordings.csv
 LOG_FILE=./zoom_to_youtube.log
 
-# Gemini API (transcription & title generation)
+# Gemini API (transcription, title, summary)
 GEMINI_API_KEY=your_gemini_api_key
 GEMINI_MODEL=gemini-3-pro-preview
 TRANSCRIPTION_PROMPT_PATH=./meeting-transcripts/prompts/transcription_prompt.txt
 TITLE_PROMPT_PATH=./meeting-transcripts/prompts/title_prompt.txt
+SUMMARY_PROMPT_PATH=./meeting-transcripts/prompts/summary_prompt.txt
 MAX_TRANSCRIPTION_DURATION=7200
 
 # Transcript storage (GitHub repo)
@@ -339,7 +361,7 @@ DISCORD_NOTIFICATION_TEMPLATE_PATH=./meeting-transcripts/prompts/discord_notific
 - `google-auth` - YouTube OAuth
 - `google-auth-oauthlib` - YouTube OAuth flow
 - `google-api-python-client` - YouTube API
-- `google-genai` - Gemini API (transcription, title generation)
+- `google-genai` - Gemini API (transcription, title, summary)
 - `python-dotenv` - Environment variable loading
 
 ## Logging

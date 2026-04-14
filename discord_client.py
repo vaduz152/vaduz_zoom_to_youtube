@@ -30,6 +30,7 @@ def _load_notification_template() -> str:
 def send_notification(
     youtube_url: str,
     transcript_url: str | None = None,
+    summary_url: str | None = None,
     generated_title: str | None = None,
     meeting_topic: str | None = None,
     meeting_datetime: str | None = None,
@@ -38,17 +39,17 @@ def send_notification(
     """
     Send a Discord notification using the template.
 
-    Template variables: {title}, {youtube_url}, {transcript_url}, {datetime}, {cost}
+    Template variables: {title}, {youtube_url}, {transcript_url}, {summary_url}, {datetime}, {cost}
     """
     template = _load_notification_template()
 
     title = generated_title or meeting_topic or ""
-    transcript = transcript_url or "[транскрипт недоступен]"
 
     message = template.format(
         title=title,
         youtube_url=youtube_url,
-        transcript_url=transcript,
+        transcript_url=transcript_url or "",
+        summary_url=summary_url or "",
         datetime=meeting_datetime or "",
         cost=transcription_cost or "",
     )

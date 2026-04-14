@@ -27,7 +27,9 @@ CSV_HEADERS = [
     "last_notified_error",
     "transcribed_at",
     "transcript_url",
-    "generated_title"
+    "generated_title",
+    "summarized_at",
+    "summary_url",
 ]
 
 
@@ -61,7 +63,8 @@ class VideoTracker:
                         row[field] = '0'
                 for field in ('error_notified_at', 'last_notified_error',
                               'transcribed_at', 'transcript_url', 'generated_title',
-                              'video_ready_at', 'vtt_ready_at'):
+                              'video_ready_at', 'vtt_ready_at',
+                              'summarized_at', 'summary_url'):
                     if field not in row:
                         row[field] = ''
                 records.append(row)
@@ -146,6 +149,7 @@ class VideoTracker:
                     record.get('zoom_downloaded_at') and
                     record.get('youtube_uploaded_at') and
                     record.get('transcribed_at') and
+                    record.get('summarized_at') and
                     record.get('discord_notified_at')
                 )
         return False
@@ -280,6 +284,13 @@ class VideoTracker:
             'transcribed_at': datetime.now().isoformat(),
             'transcript_url': transcript_url,
             'generated_title': generated_title,
+        })
+
+    def record_summary(self, zoom_uuid: str, summary_url: str) -> bool:
+        """Record a successful summary. Returns True if previous failures were resolved."""
+        return self._record_success(zoom_uuid, 'summarized', {
+            'summarized_at': datetime.now().isoformat(),
+            'summary_url': summary_url,
         })
 
     def record_skipped(
