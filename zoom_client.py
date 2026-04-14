@@ -14,6 +14,7 @@ import requests
 
 import config
 from gallery_identifier import find_best_gallery_view_file
+from utils import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
@@ -70,51 +71,72 @@ def exchange_code_for_tokens(authorization_code: str) -> Tuple[str, str]:
     return access_token, refresh_token
 
 
+def _is_retryable_api_error(e: Exception) -> bool:
+    """Retryable errors for Zoom API calls: 5xx, 429, and network/timeout errors."""
+    if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
+        status = e.response.status_code
+        return status >= 500 or status == 429
+    return isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
+
+
 def get_access_token_from_refresh(refresh_token: str) -> str:
-    """Get a new access token using refresh token."""
+    """Get a new access token using refresh token.
+
+    Raises ValueError if the refresh token is expired/revoked (not retryable).
+    Raises HTTPError / ConnectionError / Timeout on transient failures after retries.
+    """
     credentials = f"{config.ZOOM_CLIENT_ID}:{config.ZOOM_CLIENT_SECRET}"
     encoded_credentials = base64.b64encode(credentials.encode()).decode()
-    
+
     headers = {
         "Authorization": f"Basic {encoded_credentials}",
         "Content-Type": "application/x-www-form-urlencoded"
     }
-    
+
     data = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token
     }
-    
-    response = requests.post("https://zoom.us/oauth/token", headers=headers, data=data)
-    
-    # Check for token expiration/revocation errors before raising
-    if response.status_code != 200:
-        try:
-            error_data = response.json()
+
+    def _do_refresh():
+        response = requests.post(
+            "https://zoom.us/oauth/token",
+            headers=headers,
+            data=data,
+            timeout=30,
+        )
+
+        if response.status_code != 200:
+            try:
+                error_data = response.json()
+            except ValueError:
+                error_data = {}
             error_code = error_data.get("error", "")
             error_description = error_data.get("error_description", "")
-            
-            # Check for token expiration/revocation errors
-            if error_code in ["invalid_grant", "invalid_token"] or "expired" in error_description.lower() or "revoked" in error_description.lower():
+
+            if (error_code in ("invalid_grant", "invalid_token")
+                    or "expired" in error_description.lower()
+                    or "revoked" in error_description.lower()):
                 error_msg = f"{error_code}: {error_description}" if error_description else error_code
                 raise ValueError(f"Refresh token expired or revoked: {error_msg}")
-        except (ValueError, KeyError):
-            # If we can't parse the error or it's not a token expiration error, 
-            # let raise_for_status() handle it
-            # Note: ValueError here means we raised it ourselves for token expiration
-            # If response.json() fails, it will raise on the next call, which is fine
-            pass
-    
-    response.raise_for_status()
-    
-    token_data = response.json()
+
+            response.raise_for_status()
+
+        return response.json()
+
+    token_data = retry_with_backoff(
+        _do_refresh,
+        max_retries=3,
+        delays=(2, 5, 10),
+        retryable_check=_is_retryable_api_error,
+    )
+
     access_token = token_data.get("access_token")
     new_refresh_token = token_data.get("refresh_token")
-    
-    # Update refresh token if a new one is provided
+
     if new_refresh_token and new_refresh_token != refresh_token:
         config.ZOOM_REFRESH_TOKEN_FILE.write_text(new_refresh_token)
-    
+
     return access_token
 
 
@@ -246,12 +268,14 @@ def get_access_token() -> str:
                 token_file.unlink()
                 logger.info("Removed invalid token file")
         except Exception as e:
-            # Other errors (network issues, etc.)
+            # Transient errors (5xx, network, timeouts). DO NOT delete the refresh
+            # token — it is still valid. Propagate so the caller aborts this run
+            # and the next cron invocation can retry with the same token.
             error_str = str(e)
-            logger.warning(f"Refresh token failed: {error_str}")
-            logger.info("Need to re-authorize...")
-            
-            # Send Discord notification for other token errors too
+            logger.error(
+                f"Zoom token refresh failed (transient error, refresh token preserved): {error_str}"
+            )
+
             if DISCORD_AVAILABLE:
                 try:
                     discord_client.send_error_notification(
@@ -260,9 +284,8 @@ def get_access_token() -> str:
                     )
                 except Exception as discord_error:
                     logger.warning(f"Failed to send Discord notification: {discord_error}")
-            
-            if token_file.exists():
-                token_file.unlink()
+
+            raise
     
     # No valid refresh token, need to get authorization code
     auth_url = get_authorization_url()
@@ -351,31 +374,41 @@ def list_recordings(
     }
     
     url = f"https://zoom.us/v2/users/{config.ZOOM_USER_ID}/recordings"
+
+    def _fetch_page(request_params):
+        def _do():
+            resp = requests.get(url, headers=headers, params=request_params, timeout=60)
+            if resp.status_code != 200:
+                logger.error(f"Error: {resp.status_code}")
+                logger.error(f"Response: {resp.text}")
+            resp.raise_for_status()
+            return resp.json()
+
+        return retry_with_backoff(
+            _do,
+            max_retries=3,
+            delays=(10, 30, 60),
+            retryable_check=_is_retryable_api_error,
+        )
+
     params = {"page_size": page_size}
-    
+
     # Add date filters if provided
     if from_date:
         params["from"] = from_date
     if to_date:
         params["to"] = to_date
-    
-    response = requests.get(url, headers=headers, params=params)
-    
-    if response.status_code != 200:
-        logger.error(f"Error: {response.status_code}")
-        logger.error(f"Response: {response.text}")
-        response.raise_for_status()
-    
-    data = response.json()
+
+    data = _fetch_page(params)
     recordings = data.get("meetings", [])
-    
+
     logger.info(f"Found {len(recordings)} recordings in this page")
-    
+
     # Handle pagination if next_page_token exists
     all_recordings = recordings.copy()
     next_page_token = data.get("next_page_token")
     page_number = 1
-    
+
     while next_page_token:
         logger.debug(f"Fetching page {page_number + 1}...")
         next_params = {"page_size": page_size, "next_page_token": next_page_token}
@@ -383,11 +416,8 @@ def list_recordings(
             next_params["from"] = from_date
         if to_date:
             next_params["to"] = to_date
-            
-        response = requests.get(url, headers=headers, params=next_params)
-        response.raise_for_status()
-        
-        page_data = response.json()
+
+        page_data = _fetch_page(next_params)
         page_recordings = page_data.get("meetings", [])
         all_recordings.extend(page_recordings)
         next_page_token = page_data.get("next_page_token")
@@ -497,7 +527,6 @@ def download_file(download_url: str, access_token: str, output_path: Path) -> No
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-    from utils import retry_with_backoff
     retry_with_backoff(_do_download, max_retries=3, delays=(10, 30, 60),
                        retryable_check=_is_retryable_download_error)
 
